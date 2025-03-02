@@ -1,0 +1,18 @@
+build/
+install/
+log/
+
+# Ignore all files in the src directory
+
+src/carla_sensors/config/
+src/carla_sensors/launch/
+src/carla_sensors/test/
+src/carla_sensors/test_carla_sensors.py
+src/carla_sensors/__init__.py
+
+#   config  launch  msg  package.xml  pcd  resource  setup.cfg  setup.py  test
+
+src/carla_sensors/msg/
+src/carla_sensors/pcd/
+src/carla_sensors/resource/
+src/carla_sensors/test/
