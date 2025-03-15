@@ -1,96 +1,123 @@
+#!/usr/bin/env python3
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import PointCloud2, PointField
 import socket
 import struct
-import time
-from sensor_msgs.msg import PointCloud2, PointField
-from rclpy.node import Node
-import rclpy
+import numpy as np
 
 
 class LidarClient(Node):
     def __init__(self):
         super().__init__('lidar_client')
+        
+        # ROS2 Publisher
         self.publisher = self.create_publisher(PointCloud2, '/lidar/points', 30)
-        self.tcp_ip = '127.0.0.1'  # Server IP
-        self.tcp_port = 12345       # Server port (should match LISTEN_PORT in C++)
+        
+        # TCP Client setup
+        self.tcp_ip = '127.0.0.1'
+        self.tcp_port = 12350
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.bind((self.tcp_ip, self.tcp_port))  # Bind the socket to the IP and port
-        self.socket.listen(1)  # Listen for incoming connections
+        
+        # Connect to server
+        self.get_logger().info(f'Attempting to connect to {self.tcp_ip}:{self.tcp_port}...')
+        try:
+            self.socket.connect((self.tcp_ip, self.tcp_port))
+            self.get_logger().info('Connected to server successfully')
+        except ConnectionRefusedError:
+            self.get_logger().error('Connection refused. Make sure the server is running.')
+            raise
+        except Exception as e:
+            self.get_logger().error(f'Connection failed: {str(e)}')
+            raise
 
-        self.get_logger().info('Waiting for a connection...')  # Log waiting for a connection
-        self.connection, client_address = self.socket.accept()  # Accept a connection from a client
-        self.get_logger().info(f'Connected to client at {client_address}')  # Log the client connection
+        # Create timer for receiving data
+        self.timer = self.create_timer(0.01, self.receive_data)  # 100Hz
 
-        # Start receiving data
-        self.timer = self.create_timer(0.01, self.receive_data)
+    def receive_exact(self, size):
+        """Helper function to receive exact number of bytes"""
+        data = b''
+        while len(data) < size:
+            packet = self.socket.recv(size - len(data))
+            if not packet:
+                return None
+            data += packet
+        return data
 
     def receive_data(self):
-        while True:
-            try:
-                data = self.connection.recv(12)  # Expecting 12 bytes for each point (3 floats)
+        try:
+            # Receive number of clusters
+            data = self.receive_exact(4)
+            if not data:
+                return
+            num_clusters = struct.unpack('!I', data)[0]
+            self.get_logger().info(f'Receiving {num_clusters} clusters')
+            
+            all_points = []
+            
+            # Process each cluster
+            for cluster_idx in range(num_clusters):
+                # Receive number of points in this cluster
+                data = self.receive_exact(4)
                 if not data:
-                    self.get_logger().error('Connection closed by the server.')
-                    self.reconnect()  # Attempt to reconnect
-                    continue  # Skip to the next iteration to wait for data
-
-                if len(data) < 12:
-                    self.get_logger().error('Incomplete point data received.')
-                    continue
-
-                # Unpack the point data
-                point = struct.unpack('fff', data)  # Each point is 3 floats
-                self.get_logger().info(f'Received point: x={point[0]}, y={point[1]}, z={point[2]}')
-
-                # Create a PointCloud2 message
-                point_msg = PointCloud2()
-                point_msg.header.stamp = self.get_clock().now().to_msg()  # Set the timestamp
-                point_msg.header.frame_id = 'lidar_frame'  # Set the frame ID
-                point_msg.height = 1
-                point_msg.width = 1
-                point_msg.is_dense = True
-                point_msg.is_bigendian = False
-                point_msg.fields = [
+                    return
+                num_points = struct.unpack('!I', data)[0]
+                self.get_logger().info(f'Cluster {cluster_idx + 1}: {num_points} points')
+                
+                # Receive all points in this cluster
+                for point_idx in range(num_points):
+                    point_data = self.receive_exact(12)  # 3 floats * 4 bytes
+                    if not point_data:
+                        return
+                    
+                    # Unpack the point data (network byte order)
+                    x, y, z = struct.unpack('!fff', point_data)
+                    all_points.append([x, y, z])
+                    
+                    # Print the received point data
+                    self.get_logger().info(f'Received LiDAR Data - X: {x:.3f}, Y: {y:.3f}, Z: {z:.3f}')
+                
+            if all_points:  # Only publish if we have points
+                # Create PointCloud2 message
+                msg = PointCloud2()
+                msg.header.stamp = self.get_clock().now().to_msg()
+                msg.header.frame_id = 'map'
+                
+                # Set up the fields
+                msg.fields = [
                     PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
                     PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
                     PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
                 ]
-                point_msg.data = struct.pack('fff', *point)  # Pack the point data
-                point_msg.point_step = 12  # Size of a point (3 floats)
-                point_msg.row_step = point_msg.point_step
-                point_msg.width = 1
-                point_msg.height = 1
+                
+                # Convert points to numpy array
+                points = np.array(all_points, dtype=np.float32)
+                
+                # Set message parameters
+                msg.height = 1
+                msg.width = len(points)
+                msg.is_bigendian = False
+                msg.point_step = 12  # 3 * float32 (4 bytes each)
+                msg.row_step = msg.point_step * len(points)
+                msg.is_dense = True
+                msg.data = points.tobytes()
+                
+                # Publish the message
+                self.publisher.publish(msg)
+                self.get_logger().debug(f'Published {len(points)} points from {num_clusters} clusters')
+                
+        except Exception as e:
+            self.get_logger().error(f'Error receiving data: {str(e)}')
 
-                self.publisher.publish(point_msg)
-                self.get_logger().info('Point published to /lidar/points')
-
-            except (socket.error, struct.error) as e:
-                self.get_logger().error(f'Error receiving point data: {e}')
-                self.reconnect()  # Attempt to reconnect on error
-
-    def reconnect(self):
-        self.get_logger().info('Attempting to reconnect...')
-        self.socket.close()  # Close the current socket
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # Create a new socket
-        self.socket.bind((self.tcp_ip, self.tcp_port))  # Rebind to the IP and port
-        self.socket.listen(1)  # Listen for incoming connections
-        self.get_logger().info('Waiting for a new connection...')
-        self.connection, client_address = self.socket.accept()  # Accept a new connection
-        self.get_logger().info(f'Connected to client at {client_address}')  # Log the new client connection
-
-    def shutdown(self):
-        if self.socket:
-            self.socket.close()
-            self.get_logger().info('Socket closed.')
+    def __del__(self):
+        self.socket.close()
 
 def main(args=None):
     rclpy.init(args=args)
-    lidar_client = LidarClient()
-    try:
-        rclpy.spin(lidar_client)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        lidar_client.shutdown()
-        rclpy.shutdown()
+    node = LidarClient()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
