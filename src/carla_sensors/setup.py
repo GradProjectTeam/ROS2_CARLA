@@ -1,4 +1,6 @@
 from setuptools import setup
+import os
+from glob import glob
 
 package_name = 'carla_sensors'
 
@@ -27,17 +29,29 @@ setup(
             'lidar_param_tuner = carla_sensors.lidar_param_tuner:main',
             'radar_listener_raw = carla_sensors.radar_listener_raw:main',
             'radar_listener_clusters = carla_sensors.radar_listener_clusters:main',
+            'radar_listener_clusters_colored = carla_sensors.radar_listener_clusters_colored:main',
+            'enhanced_radar_visualizer = carla_sensors.enhanced_radar_visualizer:main',
+            'radar_costmap_creator = carla_sensors.radar_costmap_creator:main',
+            'lidar_costmap_creator = carla_sensors.lidar_costmap_creator:main',
+            'sensor_fusion_costmap = carla_sensors.sensor_fusion_costmap:main',
+            'imu_rviz_visualizer = carla_sensors.imu_rviz_visualizer:main',
+            
+        
         ],
 
     },
     # Add this section to include message generation
     data_files=[
         ('share/ament_index/resource_index/packages',
-         
          ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/config', ['config/ekf.yaml']),
-        ('share/' + package_name + '/launch', ['launch/localization.launch.py']),
+        ('share/' + package_name + '/config', glob('config/*.yaml')),
+        # Include all launch files
+        ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
+        # Include RViz configuration files
+        ('share/' + package_name + '/rviz', glob('rviz/*.rviz')),
+        # Include README files
+        ('share/' + package_name, glob('*.md')),
     ],
     # Add this section to include additional packages
     package_data={

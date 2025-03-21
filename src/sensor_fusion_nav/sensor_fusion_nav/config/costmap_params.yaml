@@ -1,0 +1,46 @@
+costmap_creator_node:
+  ros__parameters:
+    update_frequency: 10.0
+    publish_frequency: 5.0
+    global_frame: map
+    robot_base_frame: base_link
+    rolling_window: true
+    width: 10.0
+    height: 10.0
+    resolution: 0.05
+    
+    # Plugin configuration
+    plugins: ["obstacle_layer", "inflation_layer"]
+    
+    obstacle_layer:
+      plugin: "nav2_costmap_2d::ObstacleLayer"
+      enabled: true
+      observation_sources: lidar radar
+      lidar:
+        topic: /lidar_grid
+        sensor_frame: lidar_frame
+        observation_persistence: 0.0
+        expected_update_rate: 10.0
+        data_type: "nav_msgs/OccupancyGrid"
+        min_obstacle_height: 0.0
+        max_obstacle_height: 2.0
+        marking: true
+        clearing: true
+      radar:
+        topic: /radar_grid
+        sensor_frame: radar_frame
+        observation_persistence: 0.0
+        expected_update_rate: 10.0
+        data_type: "nav_msgs/OccupancyGrid"
+        min_obstacle_height: 0.0
+        max_obstacle_height: 2.0
+        marking: true
+        clearing: true
+    
+    inflation_layer:
+      plugin: "nav2_costmap_2d::InflationLayer"
+      enabled: true
+      inflation_radius: 0.5
+      cost_scaling_factor: 3.0
+      inflate_unknown: false
+      inflate_around_unknown: false
