@@ -33,10 +33,11 @@ setup(
             'enhanced_radar_visualizer = carla_sensors.enhanced_radar_visualizer:main',
             'radar_costmap_creator = carla_sensors.radar_costmap_creator:main',
             'lidar_costmap_creator = carla_sensors.lidar_costmap_creator:main',
+            'lidar_costmap_enhanced = carla_sensors.lidar_costmap_enhanced:main',
             'sensor_fusion_costmap = carla_sensors.sensor_fusion_costmap:main',
             'imu_rviz_visualizer = carla_sensors.imu_rviz_visualizer:main',
-            
-        
+            'lidar_raw_costmap_creator = carla_sensors.lidar_raw_costmap_creator:main',
+            'lidar_listener_clusters_2 = carla_sensors.lidar_listener_clusters_2:main',
         ],
 
     },
