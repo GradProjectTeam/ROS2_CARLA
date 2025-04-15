@@ -96,6 +96,43 @@ def generate_launch_description():
             description='Maximum number of points to process per update'
         ),
         
+        # Vehicle filter parameters
+        DeclareLaunchArgument(
+            'filter_vehicle_points',
+            default_value='true',
+            description='Whether to filter out points that hit the car itself'
+        ),
+        DeclareLaunchArgument(
+            'vehicle_length',
+            default_value='4.5',
+            description='Length of vehicle in meters (x direction)'
+        ),
+        DeclareLaunchArgument(
+            'vehicle_width',
+            default_value='2.0',
+            description='Width of vehicle in meters (y direction)'
+        ),
+        DeclareLaunchArgument(
+            'vehicle_height',
+            default_value='1.8',
+            description='Height of vehicle in meters (z direction)'
+        ),
+        DeclareLaunchArgument(
+            'vehicle_x_offset',
+            default_value='0.0',
+            description='Offset of vehicle center in x direction'
+        ),
+        DeclareLaunchArgument(
+            'vehicle_y_offset',
+            default_value='0.0',
+            description='Offset of vehicle center in y direction'
+        ),
+        DeclareLaunchArgument(
+            'vehicle_safety_margin',
+            default_value='0.2',
+            description='Extra margin around vehicle to filter'
+        ),
+        
         # LiDAR Listener Node
         Node(
             package='sensor_fusion',
@@ -111,6 +148,15 @@ def generate_launch_description():
                 'use_cluster_stats': LaunchConfiguration('use_cluster_stats'),
                 'verbose_logging': False,
                 'cube_alpha': 0.3,
+                
+                # Vehicle filter parameters
+                'filter_vehicle_points': LaunchConfiguration('filter_vehicle_points'),
+                'vehicle_length': LaunchConfiguration('vehicle_length'),
+                'vehicle_width': LaunchConfiguration('vehicle_width'),
+                'vehicle_height': LaunchConfiguration('vehicle_height'),
+                'vehicle_x_offset': LaunchConfiguration('vehicle_x_offset'),
+                'vehicle_y_offset': LaunchConfiguration('vehicle_y_offset'),
+                'vehicle_safety_margin': LaunchConfiguration('vehicle_safety_margin'),
             }],
             output='screen'
         ),

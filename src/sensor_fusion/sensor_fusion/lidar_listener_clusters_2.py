@@ -22,6 +22,7 @@ class LidarClient_clusters_2(Node):
         self.marker_publisher = self.create_publisher(MarkerArray, '/lidar/markers', 10)
         self.hull_publisher = self.create_publisher(MarkerArray, '/lidar/hulls', 10)
         self.cube_publisher = self.create_publisher(MarkerArray, '/lidar/cubes', 10)  # New publisher for cubes
+        self.vehicle_publisher = self.create_publisher(Marker, '/lidar/vehicle', 10)  # Publisher for vehicle visualization
         
         # Parameter declaration
         self.declare_parameter('tcp_ip', '127.0.0.1')
@@ -45,10 +46,44 @@ class LidarClient_clusters_2(Node):
         self.verbose_logging = self.get_parameter('verbose_logging').value
         self.cube_alpha = self.get_parameter('cube_alpha').value
         
+        # Add parameters for filtering points that hit the car itself
+        self.declare_parameter('filter_vehicle_points', True)  # Whether to filter out points hitting the car
+        self.declare_parameter('vehicle_length', 4.5)          # Length of vehicle in meters (x direction)
+        self.declare_parameter('vehicle_width', 2.0)           # Width of vehicle in meters (y direction)
+        self.declare_parameter('vehicle_height', 1.8)          # Height of vehicle in meters (z direction)
+        self.declare_parameter('vehicle_x_offset', 0.0)        # Offset of vehicle center in x direction
+        self.declare_parameter('vehicle_y_offset', 0.0)        # Offset of vehicle center in y direction
+        self.declare_parameter('vehicle_safety_margin', 0.2)   # Extra margin around vehicle to filter
+        
+        # Get vehicle filter parameters
+        self.filter_vehicle_points = self.get_parameter('filter_vehicle_points').value
+        self.vehicle_length = self.get_parameter('vehicle_length').value
+        self.vehicle_width = self.get_parameter('vehicle_width').value
+        self.vehicle_height = self.get_parameter('vehicle_height').value
+        self.vehicle_x_offset = self.get_parameter('vehicle_x_offset').value
+        self.vehicle_y_offset = self.get_parameter('vehicle_y_offset').value
+        self.vehicle_safety_margin = self.get_parameter('vehicle_safety_margin').value
+        
+        # Calculate vehicle filter boundaries with safety margin
+        self.vehicle_x_min = self.vehicle_x_offset - (self.vehicle_length / 2) - self.vehicle_safety_margin
+        self.vehicle_x_max = self.vehicle_x_offset + (self.vehicle_length / 2) + self.vehicle_safety_margin
+        self.vehicle_y_min = self.vehicle_y_offset - (self.vehicle_width / 2) - self.vehicle_safety_margin
+        self.vehicle_y_max = self.vehicle_y_offset + (self.vehicle_width / 2) + self.vehicle_safety_margin
+        self.vehicle_z_min = -self.vehicle_safety_margin  # Assuming vehicle is at ground level
+        self.vehicle_z_max = self.vehicle_height + self.vehicle_safety_margin
+        
+        # Log vehicle filter settings
+        if self.filter_vehicle_points:
+            self.get_logger().info(f"Vehicle point filtering enabled")
+            self.get_logger().info(f"Vehicle filter zone: X [{self.vehicle_x_min:.2f}, {self.vehicle_x_max:.2f}], " 
+                                 f"Y [{self.vehicle_y_min:.2f}, {self.vehicle_y_max:.2f}], "
+                                 f"Z [{self.vehicle_z_min:.2f}, {self.vehicle_z_max:.2f}]")
+        
         # Connection statistics
         self.last_receive_time = time.time()
         self.points_received = 0
         self.clusters_received = 0
+        self.points_filtered = 0  # Track how many points are filtered out
         
         # TCP Client setup
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -76,9 +111,19 @@ class LidarClient_clusters_2(Node):
         if elapsed > 0:
             points_per_sec = self.points_received / elapsed
             clusters_per_sec = self.clusters_received / elapsed
-            self.get_logger().info(f'Stats: {points_per_sec:.1f} points/s, {clusters_per_sec:.1f} clusters/s')
+            
+            stats_msg = f'Stats: {points_per_sec:.1f} points/s, {clusters_per_sec:.1f} clusters/s'
+            if self.filter_vehicle_points:
+                filtered_per_sec = self.points_filtered / elapsed
+                filter_percentage = 0.0
+                if self.points_received + self.points_filtered > 0:
+                    filter_percentage = (self.points_filtered / (self.points_received + self.points_filtered)) * 100
+                stats_msg += f', filtered {filtered_per_sec:.1f} points/s ({filter_percentage:.1f}%)'
+                
+            self.get_logger().info(stats_msg)
             self.points_received = 0
             self.clusters_received = 0
+            self.points_filtered = 0
             self.last_receive_time = now
 
     def receive_exact(self, size):
@@ -140,6 +185,10 @@ class LidarClient_clusters_2(Node):
 
     def receive_data(self):
         try:
+            # First, publish the vehicle visualization if filtering is enabled
+            if self.filter_vehicle_points:
+                self.publish_vehicle_visualization()
+                
             # Receive number of clusters
             data = self.receive_exact(4)
             if not data:
@@ -207,6 +256,14 @@ class LidarClient_clusters_2(Node):
                         if point_id % 1000 == 0:  # Only log occasionally
                             self.get_logger().warn(f'Filtered extreme value: {x}, {y}, {z}')
                         continue
+                    
+                    # Filter out points that are within the vehicle boundary
+                    if self.filter_vehicle_points:
+                        if (self.vehicle_x_min <= x <= self.vehicle_x_max and
+                            self.vehicle_y_min <= y <= self.vehicle_y_max and
+                            self.vehicle_z_min <= z <= self.vehicle_z_max):
+                            self.points_filtered += 1
+                            continue
                     
                     # Add the point
                     cluster_points.append([x, y, z])
@@ -488,6 +545,41 @@ class LidarClient_clusters_2(Node):
             
         except Exception as e:
             self.get_logger().error(f'Error receiving data: {str(e)}')
+
+    def publish_vehicle_visualization(self):
+        """Publish a visualization of the vehicle filter zone"""
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "vehicle_filter_zone"
+        marker.id = 0
+        marker.type = Marker.CUBE
+        marker.action = Marker.ADD
+        
+        # Set position to vehicle center
+        marker.pose.position.x = self.vehicle_x_offset
+        marker.pose.position.y = self.vehicle_y_offset
+        marker.pose.position.z = self.vehicle_z_max / 2  # Center in Z
+        
+        # Set orientation (identity quaternion)
+        marker.pose.orientation.w = 1.0
+        
+        # Set dimensions - using the filter boundaries
+        marker.scale.x = self.vehicle_x_max - self.vehicle_x_min
+        marker.scale.y = self.vehicle_y_max - self.vehicle_y_min
+        marker.scale.z = self.vehicle_z_max - self.vehicle_z_min
+        
+        # Set color - red, semi-transparent
+        marker.color.r = 1.0
+        marker.color.g = 0.0
+        marker.color.b = 0.0
+        marker.color.a = 0.3  # Semi-transparent
+        
+        # Set lifetime (2 seconds is enough since we publish at 1Hz stats)
+        marker.lifetime.sec = 2
+        
+        # Publish
+        self.vehicle_publisher.publish(marker)
 
     def __del__(self):
         self.socket.close()
