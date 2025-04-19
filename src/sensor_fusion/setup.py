@@ -7,7 +7,7 @@ package_name = 'sensor_fusion'
 setup(
     name=package_name,
     version='0.1.0',
-    packages=[package_name],
+    packages=[package_name, package_name + '.test'],
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
@@ -15,6 +15,7 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'rviz'), glob('rviz/*.rviz')),
         (os.path.join('share', package_name, 'config'), glob('config/*.rviz')),
+        (os.path.join('share', package_name, 'test'), glob('test/*.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -37,6 +38,11 @@ setup(
             'imu_listener = sensor_fusion.imu_listener:main',
             'imu_euler_visualizer = sensor_fusion.imu_euler_visualizer:main',
             'imu_lidar_yaw_fusion = sensor_fusion.imu_lidar_yaw_fusion:main',
+            'mpc_planner = sensor_fusion.mpc_planner:main',
+            'hybrid_astar_planner = sensor_fusion.hybrid_astar_planner:main',
+            'frenet_path_smoother = sensor_fusion.frenet_path_smoother:main',
+            'dwa_local_planner = sensor_fusion.dwa_local_planner:main',
+            'test_navigation = sensor_fusion.test.test_navigation:main',
         ],
     },
 )
