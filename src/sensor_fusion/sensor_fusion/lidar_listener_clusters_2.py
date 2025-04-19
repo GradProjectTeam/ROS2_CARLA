@@ -47,7 +47,7 @@ class LidarClient_clusters_2(Node):
         self.cube_alpha = self.get_parameter('cube_alpha').value
         
         # Add parameters for filtering points that hit the car itself
-        self.declare_parameter('filter_vehicle_points', True)  # Whether to filter out points hitting the car
+        self.declare_parameter('filter_vehicle_points', False)  # Whether to filter out points hitting the car
         self.declare_parameter('vehicle_length', 4.5)          # Length of vehicle in meters (x direction)
         self.declare_parameter('vehicle_width', 2.0)           # Width of vehicle in meters (y direction)
         self.declare_parameter('vehicle_height', 1.8)          # Height of vehicle in meters (z direction)
