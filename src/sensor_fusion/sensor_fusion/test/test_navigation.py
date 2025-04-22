@@ -25,23 +25,20 @@ class NavigationTester(Node):
         )
         
         # Define parameter descriptors for better parameter service
+        # Simplified parameter descriptor without range constraints to avoid validation issues
         yaw_offset_descriptor = ParameterDescriptor(
-            description='Yaw offset to adjust IMU orientation in radians',
-            floating_point_range=[FloatingPointRange(
-                from_value=-3.14159,
-                to_value=3.14159,
-                step=0.01
-            )]
+            description='Yaw offset to adjust IMU orientation in radians'
         )
         
         # Declare parameters
         self.declare_parameter('imu_topic', '/imu/data')
         self.declare_parameter('map_topic', '/realtime_map')
         self.declare_parameter('use_filtered_yaw', True)
-        self.declare_parameter('yaw_filter_size', 5)
+        self.declare_parameter('yaw_filter_size', 3)  # Smaller filter size for faster response (was 5)
         self.declare_parameter('yaw_weight', 0.8)
         self.declare_parameter('goal_distance', 5.0)
-        self.declare_parameter('yaw_offset', math.pi, yaw_offset_descriptor)  # Default 180 degrees (π radians) offset
+        self.declare_parameter('yaw_offset', 1.5, yaw_offset_descriptor)  # Default 1.5 radians (approximately 90 degrees)
+        self.declare_parameter('publish_rate', 20.0)  # Higher publish rate (was 10Hz, now 20Hz) 
         
         # Get parameters
         self.imu_topic = self.get_parameter('imu_topic').value
@@ -51,6 +48,7 @@ class NavigationTester(Node):
         self.yaw_weight = self.get_parameter('yaw_weight').value
         self.goal_distance = self.get_parameter('goal_distance').value
         self.yaw_offset = self.get_parameter('yaw_offset').value
+        self.publish_rate = self.get_parameter('publish_rate').value
         
         # Add parameter callback for dynamic parameter updates
         self.add_on_set_parameters_callback(self.parameters_callback)
@@ -76,12 +74,12 @@ class NavigationTester(Node):
             qos_profile
         )
         
-        # New IMU subscriber
+        # New IMU subscriber - higher QoS depth for better responsiveness
         self.imu_sub = self.create_subscription(
             Imu,
             self.imu_topic,
             self.imu_callback,
-            10
+            20  # Increased QoS depth (was 10)
         )
         
         # Initialize state
@@ -92,17 +90,28 @@ class NavigationTester(Node):
         self.yaw_buffer = deque(maxlen=self.yaw_filter_size)
         self.filtered_yaw = 0.0
         self.imu_ready = False
+        self.last_orientation_yaw = None
+        self.last_orientation_time = time.time()
+        self.force_goal_update = False
         
-        # Timer for publishing
-        self.publish_timer = self.create_timer(0.1, self.publish_poses)
+        # Timer for publishing - use the publish_rate parameter
+        self.publish_timer = self.create_timer(1.0 / self.publish_rate, self.publish_poses)
+        
+        # Add a higher frequency IMU monitoring timer to react faster to orientation changes
+        self.imu_monitor_timer = self.create_timer(0.02, self.check_orientation_changes)  # 50Hz monitoring
         
         self.get_logger().info('Navigation tester node initialized')
         self.get_logger().info(f'Using IMU topic: {self.imu_topic}')
         self.get_logger().info(f'Using map topic: {self.map_topic}')
         self.get_logger().info(f'Using yaw offset: {math.degrees(self.yaw_offset):.1f} degrees')
+        self.get_logger().info(f'Goal distance: {self.goal_distance:.1f} meters')
+        self.get_logger().info(f'Publishing at {self.publish_rate} Hz')
         self.get_logger().info('Waiting for map and IMU data...')
-        self.get_logger().info('You can dynamically adjust the yaw_offset parameter with:')
-        self.get_logger().info('  ros2 param set /test_navigation yaw_offset <value_in_radians>')
+        self.get_logger().info('You can dynamically adjust parameters with:')
+        self.get_logger().info('  ros2 param set /navigation_tester yaw_offset <value_in_radians>')
+        self.get_logger().info('  ros2 param set /navigation_tester goal_distance <value_in_meters>')
+        self.get_logger().info('  For example, to set 90 degrees rotation: ros2 param set /navigation_tester yaw_offset 1.6')
+        self.get_logger().info('  To extend path to 10 meters: ros2 param set /navigation_tester goal_distance 10.0')
     
     def parameters_callback(self, params):
         """Handle dynamic parameter updates"""
@@ -122,6 +131,12 @@ class NavigationTester(Node):
                 if hasattr(self, 'raw_yaw'):
                     corrected_yaw = self.normalize_angle(self.raw_yaw + self.yaw_offset)
                     self.current_yaw = corrected_yaw
+            
+            elif param.name == 'goal_distance':
+                old_distance = self.goal_distance
+                self.goal_distance = param.value
+                self.get_logger().info(f'Updated goal_distance from {old_distance:.1f} to {self.goal_distance:.1f} meters')
+                self.get_logger().info(f'Path length has been adjusted. The goal will now be {self.goal_distance} meters ahead.')
                     
         return result
     
@@ -171,17 +186,42 @@ class NavigationTester(Node):
         # Apply yaw offset to correct for IMU orientation
         corrected_yaw = self.normalize_angle(yaw + self.yaw_offset)
         
+        # Calculate change from current yaw
+        old_yaw = self.current_yaw
+        yaw_diff = abs(self.normalize_angle(corrected_yaw - old_yaw))
+        
         # Store the current yaw
         self.current_yaw = corrected_yaw
         
-        # Apply moving average filter if enabled
+        # Apply moving average filter if enabled - using a weighted average for faster response
         if self.use_filtered_yaw:
             self.yaw_buffer.append(corrected_yaw)
             
-            # Compute filtered yaw (handle wrap-around for angles)
-            sin_sum = sum(math.sin(y) for y in self.yaw_buffer)
-            cos_sum = sum(math.cos(y) for y in self.yaw_buffer)
-            self.filtered_yaw = math.atan2(sin_sum, cos_sum)
+            # For faster response, use a weighted average that emphasizes recent values
+            if len(self.yaw_buffer) >= 2:
+                # Convert to unit vectors to handle wrapping correctly
+                sin_vals = [math.sin(y) for y in self.yaw_buffer]
+                cos_vals = [math.cos(y) for y in self.yaw_buffer]
+                
+                # Apply weights - more recent values have higher weight
+                weights = [0.5 + 0.5 * i / (len(self.yaw_buffer) - 1) for i in range(len(self.yaw_buffer))]
+                
+                # Normalize weights
+                sum_weights = sum(weights)
+                weights = [w / sum_weights for w in weights]
+                
+                # Compute weighted average
+                weighted_sin = sum(s * w for s, w in zip(sin_vals, weights))
+                weighted_cos = sum(c * w for c, w in zip(cos_vals, weights))
+                
+                self.filtered_yaw = math.atan2(weighted_sin, weighted_cos)
+            else:
+                # Not enough samples yet, use current value
+                self.filtered_yaw = corrected_yaw
+        
+        # Force goal update if significant rotation (more than 2 degrees)
+        if yaw_diff > math.radians(2.0):
+            self.force_goal_update = True
         
         if not self.imu_ready:
             self.imu_ready = True
@@ -220,7 +260,12 @@ class NavigationTester(Node):
         # Only publish if both map and IMU are available
         if not (self.map_ready and self.imu_ready):
             return
-            
+        
+        # Was a forced update requested by the orientation monitor?
+        force_update = self.force_goal_update
+        if force_update:
+            self.force_goal_update = False  # Reset the flag
+        
         # Publish current pose - simulated position at the center of the map
         if self.map_data:
             # Get map center
@@ -250,17 +295,19 @@ class NavigationTester(Node):
             self.current_pose_pub.publish(current_pose)
             
             # Calculate goal position based on current pose and orientation
-            # Using trigonometry to place the goal in front of the current position in the direction of yaw
+            # Always place the goal directly in front of the vehicle based on its current orientation
             goal_pose = PoseStamped()
             goal_pose.header.stamp = self.get_clock().now().to_msg()
             goal_pose.header.frame_id = 'map'
             
-            # Calculate position using current yaw (front of the robot)
+            # CHANGE: Force recalculation of goal position using current orientation every time
+            # This ensures the goal rotates when the vehicle rotates
             goal_pose.pose.position.x = map_center_x + self.goal_distance * math.cos(orientation_yaw)
             goal_pose.pose.position.y = map_center_y + self.goal_distance * math.sin(orientation_yaw)
             goal_pose.pose.position.z = 0.0
             
-            # Set goal orientation to current yaw 
+            # Set goal orientation to be the same as current orientation
+            # This ensures the path aligns with the vehicle's direction
             goal_pose.pose.orientation.x = q[1]
             goal_pose.pose.orientation.y = q[2]
             goal_pose.pose.orientation.z = q[3]
@@ -268,13 +315,48 @@ class NavigationTester(Node):
             
             self.goal_pose_pub.publish(goal_pose)
             
-            # Log the current orientation periodically
+            # Log the current orientation periodically or when forced update occurs
             current_time = time.time()
-            if not hasattr(self, 'last_log_time') or current_time - self.last_log_time > 5.0:
+            if force_update or not hasattr(self, 'last_log_time') or current_time - self.last_log_time > 5.0:
                 self.get_logger().info(f'Raw yaw: {math.degrees(self.raw_yaw):.1f} degrees')
-                self.get_logger().info(f'Current yaw: {math.degrees(orientation_yaw):.1f} degrees')
+                self.get_logger().info(f'Vehicle orientation: {math.degrees(orientation_yaw):.1f} degrees')
                 self.get_logger().info(f'Goal position: {goal_pose.pose.position.x:.1f}, {goal_pose.pose.position.y:.1f}')
+                self.get_logger().info(f'Path direction: Forward along vehicle heading')
                 self.last_log_time = current_time
+
+    def check_orientation_changes(self):
+        """
+        Monitor orientation changes at high frequency and force 
+        goal updates when significant changes are detected
+        """
+        if not self.imu_ready:
+            return
+        
+        # Get the current orientation
+        current_orientation_yaw = self.filtered_yaw if self.use_filtered_yaw else self.current_yaw
+        current_time = time.time()
+        
+        # Initialize on first call
+        if self.last_orientation_yaw is None:
+            self.last_orientation_yaw = current_orientation_yaw
+            self.last_orientation_time = current_time
+            return
+        
+        # Check for significant orientation change (more than 1 degree)
+        yaw_diff = abs(self.normalize_angle(current_orientation_yaw - self.last_orientation_yaw))
+        if yaw_diff > math.radians(1.0):
+            # Log the change
+            self.get_logger().debug(f'Orientation changed by {math.degrees(yaw_diff):.1f} degrees')
+            
+            # Force an immediate goal update
+            self.force_goal_update = True
+            
+            # Immediately publish updated poses
+            self.publish_poses()
+            
+            # Update the stored values
+            self.last_orientation_yaw = current_orientation_yaw
+            self.last_orientation_time = current_time
 
 def main(args=None):
     rclpy.init(args=args)

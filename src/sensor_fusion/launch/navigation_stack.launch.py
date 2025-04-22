@@ -3,7 +3,7 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, TimerAction, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, TimerAction, IncludeLaunchDescription, ExecuteProcess
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -13,6 +13,7 @@ def generate_launch_description():
     pkg_dir = get_package_share_directory('sensor_fusion')
     
     # Create transform publisher nodes with higher publish frequency for faster updates
+    # These are critical for correct orientation, so ensure they have correct values
     world_to_map_node = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
@@ -190,13 +191,53 @@ def generate_launch_description():
         output='screen'
     )
     
+    # NEW: Add test navigation node for verifying orientation and path
+    test_navigation_node = Node(
+        package='sensor_fusion',
+        executable='test_navigation',
+        name='navigation_tester',
+        parameters=[{
+            'imu_topic': '/imu/data',
+            'map_topic': '/realtime_map',
+            'use_filtered_yaw': True,
+            'yaw_filter_size': 5,
+            'yaw_weight': 0.8,
+            'goal_distance': 5.0,
+            # Set the yaw offset in radians (approx 85.9 degrees)
+            'yaw_offset': LaunchConfiguration('yaw_offset'),  # Make yaw offset configurable
+            'orientation_debug': True,  # Enable orientation debugging
+            'path_verification': True,  # Enable path verification
+        }],
+        output='screen'
+    )
+    
+    # Install required dependencies if not already installed
+    install_deps_cmd = ExecuteProcess(
+        cmd=['bash', '-c', 'if ! dpkg -s libtiff6 &> /dev/null; then sudo apt-get update && sudo apt-get install -y libtiff6; fi'],
+        name='install_dependencies',
+        output='screen'
+    )
+    
     # Delay the start of the planning nodes to ensure mapping is established first
     delayed_planning = TimerAction(
         period=3.0,  # 3 second delay to allow mapping to stabilize
-        actions=[hybrid_astar_node, path_smoother_node, mpc_planner_node, dwa_planner_node]
+        actions=[hybrid_astar_node, path_smoother_node, mpc_planner_node, dwa_planner_node, 
+                test_navigation_node]
+    )
+    
+    # Set up visualizer for RVIZ
+    rviz_node = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2',
+        arguments=['-d', [os.path.join(pkg_dir, 'rviz', 'navigation.rviz')]],
+        output='screen'
     )
     
     return LaunchDescription([
+        # Install dependencies first
+        install_deps_cmd,
+        
         # TCP connection parameters for IMU and LiDAR
         DeclareLaunchArgument(
             'imu_tcp_ip',
@@ -293,8 +334,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'obstacle_threshold',
-            default_value='65',  # Threshold for marking cells as obstacles
-            description='Threshold for marking cells as obstacles (0-100)'
+            default_value='0.65',  # Slightly lower threshold for faster obstacle marking
+            description='Threshold for marking cells as obstacles (0-1)'
         ),
         DeclareLaunchArgument(
             'max_points_to_process',
@@ -325,7 +366,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'map_base_filename',
-            default_value='fast_fusion_map',  # Base filename for saved maps
+            default_value='navigation_map',  # Base filename for saved maps
             description='Base filename for saved maps'
         ),
         DeclareLaunchArgument(
@@ -334,107 +375,20 @@ def generate_launch_description():
             description='Format to save maps in (png, pgm, or both)'
         ),
         
-        # Visualization parameters
+        # IMU orientation parameter
         DeclareLaunchArgument(
-            'point_size',
-            default_value='1.0',  # Smaller point size for better performance
-            description='Size of individual point markers'
-        ),
-        DeclareLaunchArgument(
-            'center_size',
-            default_value='2.5',  # Smaller center size for better performance
-            description='Size of cluster center markers'
-        ),
-        DeclareLaunchArgument(
-            'use_convex_hull',
-            default_value='false',  # Disable convex hull for better performance
-            description='Whether to display 2D convex hull around clusters'
+            'yaw_offset',
+            default_value='1.5',  # Default to ~85 degrees (can be adjusted)
+            description='Offset to correct IMU yaw orientation in radians'
         ),
         
-        # TF static transform publishers - complete transform tree
+        # Nodes and actions
+        install_deps_cmd,
         world_to_map_node,
         map_to_base_link_node,
         base_to_imu_node,
         imu_to_lidar_node,
-        
-        # Set up the IMU Euler Visualizer node (to display IMU data)
-        Node(
-            package='sensor_fusion',
-            executable='imu_euler_visualizer',
-            name='imu_euler_visualizer',
-            parameters=[{
-                'tcp_ip': LaunchConfiguration('imu_tcp_ip'),
-                'tcp_port': LaunchConfiguration('imu_tcp_port'),
-                'reconnect_interval': 3.0,  # Faster reconnects
-                'frame_id': 'imu_link',
-                'world_frame_id': 'world',
-                'filter_window_size': 3,    # Smaller filter window for faster response
-            }],
-            output='screen'
-        ),
-        
-        # Set up the LiDAR listener node
-        Node(
-            package='sensor_fusion',
-            executable='lidar_listener_clusters_2',
-            name='lidar_cube_visualizer',
-            parameters=[{
-                'tcp_ip': LaunchConfiguration('lidar_tcp_ip'),
-                'tcp_port': LaunchConfiguration('lidar_tcp_port'),
-                'point_size': LaunchConfiguration('point_size'),
-                'center_size': LaunchConfiguration('center_size'),
-                'use_convex_hull': LaunchConfiguration('use_convex_hull'),
-                'use_point_markers': False,
-                'use_cluster_stats': True,
-                'verbose_logging': False,
-                'cube_alpha': 0.3,
-                'filter_vehicle_points': True,
-                'frame_id': 'lidar_link',
-                'use_tf_transform': True,
-            }],
-            output='screen'
-        ),
-        
-        # Set up the fast imu-lidar mapper node with a delay to ensure transforms are available
         delayed_mapper,
-        
-        # Set up the IMU-Lidar yaw fusion node
-        Node(
-            package='sensor_fusion',
-            executable='imu_lidar_yaw_fusion',
-            name='imu_lidar_yaw_fusion',
-            parameters=[{
-                # Connection parameters
-                'imu_topic': '/imu/data',
-                'map_topic': '/realtime_map',  # Use realtime map for fusion
-                
-                # Processing parameters - higher rate for faster updates
-                'publish_rate': LaunchConfiguration('publish_rate'),
-                
-                # IMU-specific parameters - faster response
-                'initial_yaw_offset': 0.0,
-                'use_filtered_yaw': True,
-                'yaw_filter_size': 5,         # Smaller filter for faster response
-                'yaw_weight': 0.8,            # Higher weight for IMU
-                
-                # TF parameters - faster lookups
-                'tf_buffer_duration': 5.0,    # Shorter buffer for faster lookups
-                'tf_timeout': 0.5,            # Shorter timeout for faster failures
-                'wait_for_transform': True,
-                'transform_tolerance': 0.25,  # Lower tolerance for faster lookups
-            }],
-            output='screen'
-        ),
-        
-        # NEW PLANNING COMPONENTS - start with a delay to ensure mapping is established
         delayed_planning,
-        
-        # Set up a 2D goal pose publisher - for setting navigation goals
-        Node(
-            package='rviz2',
-            executable='rviz2',
-            name='rviz2',
-            arguments=['-d', [get_package_share_directory('sensor_fusion'), '/rviz/navigation.rviz']],
-            output='screen'
-        ),
+        rviz_node,
     ]) 

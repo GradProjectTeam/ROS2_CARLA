@@ -187,15 +187,28 @@ class LidarClient_clusters(Node):
                         return
                     x, y, z = struct.unpack('!fff', point_data)
                     
-                    # Verify the data
+                    # Verify the data with more tolerant checks for valid LIDAR data
                     if not (isinstance(x, float) and isinstance(y, float) and isinstance(z, float)):
                         self.get_logger().error(f'Invalid point data type: {type(x)}, {type(y)}, {type(z)}')
                         continue
                     
-                    if not (abs(x) < 1000 and abs(y) < 1000 and abs(z) < 1000):  # Sanity check
-                        self.get_logger().warn(f'Suspicious point values: {x}, {y}, {z}')
+                    # Much more tolerant range validation to avoid rejecting valid points
+                    # Check for NaN and Inf
+                    if (math.isnan(x) or math.isnan(y) or math.isnan(z) or
+                        math.isinf(x) or math.isinf(y) or math.isinf(z)):
+                        continue
+                        
+                    # Very generous bounds checking (±10km) - just to catch truly absurd values
+                    if (abs(x) > 10000 or abs(y) > 10000 or abs(z) > 10000):
+                        if point_id % 1000 == 0:  # Only log occasionally
+                            self.get_logger().warn(f'Filtered extreme value: {x}, {y}, {z}')
                         continue
                     
+                    # Special handling for close objects - walls/obstacles directly in front
+                    # Points with small x/y values but valid z are likely important close objects
+                    is_close_object = (abs(x) < 5.0 and abs(y) < 5.0 and abs(z) < 3.0)
+                    
+                    # Add the point - prioritize close objects with larger marker size
                     cluster_points.append([x, y, z])
                     all_points.append([x, y, z])
                     total_points += 1

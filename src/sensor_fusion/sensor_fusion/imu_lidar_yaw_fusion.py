@@ -65,6 +65,11 @@ class ImuLidarYawFusion(Node):
         self.declare_parameter('enable_auto_save', True)  # Auto-save map periodically
         self.declare_parameter('auto_save_interval', 60.0)  # Auto-save interval in seconds
         self.declare_parameter('map_save_dir', '/home/mostafa/GP/ROS2/maps')  # Directory to save maps
+        self.declare_parameter('publish_tf', True)  # Whether to publish TF
+        self.declare_parameter('map_frame_id', 'map')  # Map frame ID
+        self.declare_parameter('base_frame_id', 'base_link')  # Base frame ID
+        self.declare_parameter('override_static_tf', True)  # Whether to override static TF
+        self.declare_parameter('publish_tf_rate', 50.0)  # Higher rate for TF publishing
         
         # Get parameters
         self.imu_topic = self.get_parameter('imu_topic').value
@@ -77,6 +82,11 @@ class ImuLidarYawFusion(Node):
         self.enable_auto_save = self.get_parameter('enable_auto_save').value
         self.auto_save_interval = self.get_parameter('auto_save_interval').value
         self.map_save_dir = self.get_parameter('map_save_dir').value
+        self.publish_tf = self.get_parameter('publish_tf').value
+        self.map_frame_id = self.get_parameter('map_frame_id').value
+        self.base_frame_id = self.get_parameter('base_frame_id').value
+        self.override_static_tf = self.get_parameter('override_static_tf').value
+        self.publish_tf_rate = self.get_parameter('publish_tf_rate').value
         
         # Ensure map save directory exists
         if not os.path.exists(self.map_save_dir):
@@ -156,6 +166,11 @@ class ImuLidarYawFusion(Node):
         self.frame_count = 0
         self.last_performance_time = time.time()
         self.create_timer(10.0, self.report_performance)
+        
+        # Create TF broadcaster and timer for TF publishing
+        self.tf_broadcaster = TransformBroadcaster(self)
+        if self.publish_tf:
+            self.create_timer(1.0 / self.publish_tf_rate, self.publish_tf_transform)
         
         self.get_logger().info('IMU Lidar Yaw Fusion node initialized')
         self.get_logger().info(f'IMU topic: {self.imu_topic}')
@@ -352,6 +367,39 @@ class ImuLidarYawFusion(Node):
         
         self.frame_count = 0
         self.last_performance_time = current_time
+
+    def publish_tf_transform(self):
+        """Publish the transform from map to base_link based on IMU orientation"""
+        if not self.publish_tf:
+            return
+        
+        with self.yaw_lock:
+            # Get the yaw to use (filtered or raw)
+            tf_yaw = self.filtered_yaw if self.use_filtered_yaw else self.current_yaw
+            
+            # Create transform message
+            t = TransformStamped()
+            t.header.stamp = self.get_clock().now().to_msg()
+            t.header.frame_id = self.map_frame_id
+            t.child_frame_id = self.base_frame_id
+            
+            # Set position (could be updated based on odometry)
+            t.transform.translation.x = 0.0
+            t.transform.translation.y = 0.0
+            t.transform.translation.z = 0.0
+            
+            # Set rotation using quaternion from yaw
+            t.transform.rotation.x = 0.0
+            t.transform.rotation.y = 0.0
+            t.transform.rotation.z = math.sin(tf_yaw / 2.0)
+            t.transform.rotation.w = math.cos(tf_yaw / 2.0)
+            
+            # Publish the transform
+            self.tf_broadcaster.sendTransform(t)
+            
+            if not hasattr(self, 'last_tf_log_time') or time.time() - self.last_tf_log_time > 5.0:
+                self.get_logger().info(f"Publishing TF: yaw={math.degrees(tf_yaw):.2f} degrees")
+                self.last_tf_log_time = time.time()
 
 def main(args=None):
     rclpy.init(args=args)
