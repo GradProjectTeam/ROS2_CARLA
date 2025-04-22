@@ -9,7 +9,9 @@ src/carla_sensors/launch/
 src/carla_sensors/test/
 src/carla_sensors/test_carla_sensors.py
 src/carla_sensors/__init__.py
-
+!src/carla_sensors/launch/
+!src/carla_sensors/resource/
+!src/carla_sensors/launch/lidar_cube_visualizer.launch.py
 #   config  launch  msg  package.xml  pcd  resource  setup.cfg  setup.py  test
 
 src/carla_sensors/msg/

@@ -27,7 +27,7 @@ class HybridAStarPlanner(Node):
         super().__init__('hybrid_astar_planner')
         
         # Declare parameters
-        self.declare_parameter('grid_size', 1.0)
+        self.declare_parameter('grid_size', 0.5)
         self.declare_parameter('wheelbase', 2.5)
         self.declare_parameter('obstacle_threshold', 50)
         self.declare_parameter('publish_rate', 5.0)
@@ -36,10 +36,15 @@ class HybridAStarPlanner(Node):
         self.declare_parameter('map_frame_id', 'map')
         
         # New tunable A* parameters
-        self.declare_parameter('max_iterations', 5000)
-        self.declare_parameter('motion_resolution', 5)
-        self.declare_parameter('angle_resolution', 18)  # 18 = 20 degree resolution
-        self.declare_parameter('heuristic_weight', 1.0)
+        self.declare_parameter('max_iterations', 10000)
+        self.declare_parameter('motion_resolution', 10)
+        self.declare_parameter('angle_resolution', 36)  # 36 = 10 degree resolution
+        self.declare_parameter('heuristic_weight', 1.5)
+        
+        # Replanning parameters
+        self.declare_parameter('replan_on_move', True)
+        self.declare_parameter('position_change_threshold', 0.25)  # meters
+        self.declare_parameter('orientation_change_threshold', 0.15)  # radians (about 8.6 degrees)
         
         # Get parameters
         self.grid_size = self.get_parameter('grid_size').value
@@ -56,11 +61,29 @@ class HybridAStarPlanner(Node):
         self.angle_resolution = self.get_parameter('angle_resolution').value
         self.heuristic_weight = self.get_parameter('heuristic_weight').value
         
+        # Replanning parameters
+        self.replan_on_move = self.get_parameter('replan_on_move').value
+        self.position_change_threshold = self.get_parameter('position_change_threshold').value
+        self.orientation_change_threshold = self.get_parameter('orientation_change_threshold').value
+        
+        # Velocity and time step parameters for motion model
+        self.velocity = 1.0  # m/s
+        self.dt = 1.0  # s
+        
         # State variables
         self.map_data = None
         self.current_pose = None
         self.goal_pose = None
         self.latest_path = None
+        
+        # Internal map representation using dictionary
+        self.cost_map = {
+            'resolution': 0.5,  # meters per grid cell
+            'width': 500,
+            'height': 500,
+            'origin': (0.0, 0.0),  # [x, y]
+            'data': np.zeros(500 * 500)  # Empty cost map to start
+        }
         
         # QoS profile for reliable communication
         qos_profile = QoSProfile(
@@ -103,11 +126,14 @@ class HybridAStarPlanner(Node):
         )
         
         self.get_logger().info('Hybrid A* Planner node initialized')
-        self.get_logger().info(f'Grid size: {self.grid_size}m')
-        self.get_logger().info(f'Max iterations: {self.max_iterations}')
-        self.get_logger().info(f'Motion resolution: {self.motion_resolution} angles')
-        self.get_logger().info(f'Angle resolution: {360/self.angle_resolution} degrees')
-        self.get_logger().info(f'Heuristic weight: {self.heuristic_weight}')
+        self.get_logger().info(f'Planning with grid size: {self.grid_size}, max iterations: {self.max_iterations}, motion resolution: {self.motion_resolution}, angle resolution: {self.angle_resolution}, heuristic weight: {self.heuristic_weight}')
+        
+        # Display full configuration
+        self.config()
+        
+        # Add variables to track previous position and orientation
+        self.last_planned_position = None
+        self.last_planned_orientation = None
     
     def pose_callback(self, msg):
         self.current_pose = msg
@@ -117,8 +143,21 @@ class HybridAStarPlanner(Node):
         self.get_logger().info(f'Received new goal: x={msg.pose.position.x}, y={msg.pose.position.y}')
         
     def map_callback(self, msg):
+        """Process incoming map data and update internal cost map"""
         self.map_data = msg
+        
+        # Update our internal map representation
+        self.cost_map['resolution'] = msg.info.resolution
+        self.cost_map['width'] = msg.info.width
+        self.cost_map['height'] = msg.info.height
+        self.cost_map['origin'] = (msg.info.origin.position.x, msg.info.origin.position.y)
+        self.cost_map['data'] = np.array(msg.data).flatten()
+        
         self.get_logger().debug('Received map update')
+        
+        # Log map configuration when received
+        if self.get_logger().get_effective_level() <= 20:  # INFO level or more verbose
+            self.config()
     
     def heuristic(self, a, b):
         """Calculate heuristic distance between nodes"""
@@ -139,6 +178,25 @@ class HybridAStarPlanner(Node):
     
     def is_obstacle(self, x, y):
         """Check if a point is an obstacle based on map data"""
+        # Try to use the internal cost_map if available and populated
+        if len(self.cost_map['data']) > 0:
+            # Convert world coordinates to grid coordinates
+            grid_x = int((x - self.cost_map['origin'][0]) / self.cost_map['resolution'])
+            grid_y = int((y - self.cost_map['origin'][1]) / self.cost_map['resolution'])
+            
+            # Check if in bounds
+            if not (0 <= grid_x < self.cost_map['width'] and 
+                    0 <= grid_y < self.cost_map['height']):
+                return True
+                
+            # Get index in the cost map data
+            index = grid_y * self.cost_map['width'] + grid_x
+            if index >= len(self.cost_map['data']):
+                return True
+                
+            return self.cost_map['data'][index] >= self.obstacle_threshold
+        
+        # Fall back to ROS map_data if internal map isn't available
         if self.map_data is None:
             return True
             
@@ -158,8 +216,12 @@ class HybridAStarPlanner(Node):
             
         return self.map_data.data[index] >= self.obstacle_threshold
     
-    def kinematic_motion(self, node, steering, velocity, dt=1.0):
+    def kinematic_motion(self, node, steering, velocity=None, dt=None):
         """Apply vehicle kinematic model"""
+        # Use provided values or defaults from class variables
+        velocity = velocity if velocity is not None else self.velocity
+        dt = dt if dt is not None else self.dt
+        
         x = node.x + velocity * np.cos(node.theta) * dt
         y = node.y + velocity * np.sin(node.theta) * dt
         theta = node.theta + (velocity / self.wheelbase) * np.tan(steering) * dt
@@ -176,12 +238,12 @@ class HybridAStarPlanner(Node):
         # Try different steering angles based on motion_resolution parameter
         for delta in np.linspace(-0.5, 0.5, self.motion_resolution):  # Steering angles
             # Forward motion
-            next_node = self.kinematic_motion(node, delta, 1.0)
+            next_node = self.kinematic_motion(node, delta)
             if not self.is_obstacle(next_node.x, next_node.y):
                 motions.append(next_node)
                 
             # Reverse motion (optional, can be enabled for more complex maneuvers)
-            # next_node = self.kinematic_motion(node, delta, -1.0)
+            # next_node = self.kinematic_motion(node, delta, -self.velocity)
             # if not self.is_obstacle(next_node.x, next_node.y):
             #     motions.append(next_node)
                 
@@ -245,6 +307,8 @@ class HybridAStarPlanner(Node):
             for neighbor in self.get_successors(current):
                 h = self.heuristic(neighbor, goal_node)
                 open_set.put((neighbor.cost + h, neighbor))
+            
+            self.get_logger().debug(f'Current node: x={current.x}, y={current.y}, theta={current.theta}, cost={current.cost}')
         
         planning_time = time.time() - start_time
         self.get_logger().warning(f'Path planning failed after {iterations} iterations ({planning_time:.3f} sec)')
@@ -324,18 +388,43 @@ class HybridAStarPlanner(Node):
         return path_msg
     
     def planning_callback(self):
-        """Generate and publish path plans on timer"""
-        if not (self.current_pose and self.goal_pose and self.map_data):
+        """Main planning loop"""
+        if not self.current_pose or not self.goal_pose or not self.map_data:
             return
+        
+        # Get current state
+        current_state = self.get_current_state()
+        if not current_state:
+            return
+        
+        # Check if we need to replan based on movement
+        should_replan = True
+        if self.replan_on_move and self.last_planned_position is not None:
+            current_pos = (current_state.x, current_state.y)
+            current_orientation = current_state.theta
             
-        # Check if we already have a path
-        if self.latest_path is not None:
-            # Publish existing path
+            # Calculate position change
+            position_change = math.sqrt(
+                (current_pos[0] - self.last_planned_position[0]) ** 2 +
+                (current_pos[1] - self.last_planned_position[1]) ** 2
+            )
+            
+            # Calculate orientation change (handle wrap-around)
+            orientation_change = abs(self.normalize_angle(current_orientation - self.last_planned_orientation))
+            
+            # Decide if we need to replan
+            if position_change < self.position_change_threshold and orientation_change < self.orientation_change_threshold:
+                should_replan = False
+            
+        if not should_replan and self.latest_path:
+            # Just publish the existing path again
             self.path_pub.publish(self.latest_path)
             return
-            
+        
+        # Continue with normal planning...
+        
         # Get current and goal states
-        start_node = self.get_current_state()
+        start_node = current_state
         goal_node = self.get_goal_state()
         
         if start_node and goal_node:
@@ -361,6 +450,59 @@ class HybridAStarPlanner(Node):
                         path_length += math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2)
                     
                     self.get_logger().info(f'Published path with {len(path_msg.poses)} points, length: {path_length:.2f}m')
+
+        # After successful planning, update the last planned position and orientation
+        self.last_planned_position = (current_state.x, current_state.y)
+        self.last_planned_orientation = current_state.theta
+    
+    def normalize_angle(self, angle):
+        """Normalize angle to be between -π and π"""
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+    
+    def config(self):
+        """Display the current configuration of the Hybrid A* planner"""
+        self.get_logger().info("Hybrid A* Config:")
+        self.get_logger().info(f"  Grid size: {self.grid_size}")
+        self.get_logger().info(f"  Velocity: {self.velocity} m/s")
+        self.get_logger().info(f"  Time step: {self.dt} s")
+        self.get_logger().info(f"  Steering samples: {self.motion_resolution}")
+        self.get_logger().info(f"  Obstacle threshold: {self.obstacle_threshold}")
+        self.get_logger().info(f"  Map dimensions: {self.cost_map['width']}x{self.cost_map['height']}")
+        self.get_logger().info(f"  Map resolution: {self.cost_map['resolution']} m/cell")
+
+    def update_map_from_dict(self, map_data_dict):
+        """Update the internal cost map directly from a dictionary"""
+        if not isinstance(map_data_dict, dict):
+            self.get_logger().error("Map data must be a dictionary")
+            return False
+            
+        required_keys = ['resolution', 'width', 'height', 'origin', 'data']
+        if not all(key in map_data_dict for key in required_keys):
+            self.get_logger().error("Map data missing required keys")
+            return False
+            
+        # Update our internal map representation
+        self.cost_map['resolution'] = map_data_dict['resolution']
+        self.cost_map['width'] = map_data_dict['width'] 
+        self.cost_map['height'] = map_data_dict['height']
+        self.cost_map['origin'] = map_data_dict['origin']
+        
+        # Ensure data is a flattened numpy array
+        if isinstance(map_data_dict['data'], np.ndarray):
+            self.cost_map['data'] = map_data_dict['data'].flatten()
+        else:
+            self.cost_map['data'] = np.array(map_data_dict['data']).flatten()
+            
+        self.get_logger().info(f"Updated internal cost map: {self.cost_map['width']}x{self.cost_map['height']} cells, {self.cost_map['resolution']}m/cell")
+        
+        # Display full configuration
+        self.config()
+        
+        return True
 
 def main(args=None):
     rclpy.init(args=args)

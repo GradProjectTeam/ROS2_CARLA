@@ -43,6 +43,12 @@ setup(
             'frenet_path_smoother = sensor_fusion.frenet_path_smoother:main',
             'dwa_local_planner = sensor_fusion.dwa_local_planner:main',
             'test_navigation = sensor_fusion.test.test_navigation:main',
+            'test_realtime_astar = sensor_fusion.test.test_realtime_astar:main',
+            'test_hybrid_astar = sensor_fusion.test.test_hybrid_astar:main',
+            'test_astar_config = sensor_fusion.test.test_astar_config:main',
+            'test_map_data_format = sensor_fusion.test.test_map_data_format:main',
+            'test_goal_pose_publisher = sensor_fusion.test_goal_pose_publisher:main',
+            'current_pose_publisher = sensor_fusion.test.current_pose_publisher:main',
         ],
     },
 )
