@@ -12,21 +12,23 @@ from queue import PriorityQueue
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
 class Node2D:
-    def __init__(self, x, y, theta, cost, parent=None):
+    def __init__(self, x, y, theta, cost, parent=None, f_cost=0.0):
         self.x = x
         self.y = y
         self.theta = theta  # orientation in radians
-        self.cost = cost
+        self.cost = cost    # g-cost (cost from start)
+        self.f_cost = f_cost  # f-cost (g-cost + heuristic)
         self.parent = parent
         
     def __lt__(self, other):
-        return self.cost < other.cost
+        # Compare nodes based on f-cost for priority queue
+        return self.f_cost < other.f_cost
 
 class HybridAStarPlanner(Node):
     def __init__(self):
         super().__init__('hybrid_astar_planner')
         
-        # Declare parameters
+        # Declare base parameters
         self.declare_parameter('grid_size', 0.5)
         self.declare_parameter('wheelbase', 2.5)
         self.declare_parameter('obstacle_threshold', 50)
@@ -35,7 +37,7 @@ class HybridAStarPlanner(Node):
         self.declare_parameter('vehicle_frame_id', 'base_link')
         self.declare_parameter('map_frame_id', 'map')
         
-        # New tunable A* parameters
+        # A* tuning parameters
         self.declare_parameter('max_iterations', 10000)
         self.declare_parameter('motion_resolution', 10)
         self.declare_parameter('angle_resolution', 36)  # 36 = 10 degree resolution
@@ -44,9 +46,15 @@ class HybridAStarPlanner(Node):
         # Replanning parameters
         self.declare_parameter('replan_on_move', True)
         self.declare_parameter('position_change_threshold', 0.25)  # meters
-        self.declare_parameter('orientation_change_threshold', 0.15)  # radians (about 8.6 degrees)
+        self.declare_parameter('orientation_change_threshold', 0.15)  # radians
         
-        # Get parameters
+        # NEW: Parameters for handling unexplored areas
+        self.declare_parameter('treat_unknown_as_obstacle', True)
+        self.declare_parameter('unknown_cost_multiplier', 100.0)
+        self.declare_parameter('publish_debug_viz', True)
+        self.declare_parameter('min_explored_percentage', 90.0)  # Min % of path through explored cells
+        
+        # Get base parameters
         self.grid_size = self.get_parameter('grid_size').value
         self.wheelbase = self.get_parameter('wheelbase').value
         self.obstacle_threshold = self.get_parameter('obstacle_threshold').value
@@ -55,18 +63,24 @@ class HybridAStarPlanner(Node):
         self.vehicle_frame_id = self.get_parameter('vehicle_frame_id').value
         self.map_frame_id = self.get_parameter('map_frame_id').value
         
-        # Get new parameters
+        # Get A* parameters
         self.max_iterations = self.get_parameter('max_iterations').value
         self.motion_resolution = self.get_parameter('motion_resolution').value
         self.angle_resolution = self.get_parameter('angle_resolution').value
         self.heuristic_weight = self.get_parameter('heuristic_weight').value
         
-        # Replanning parameters
+        # Get replanning parameters
         self.replan_on_move = self.get_parameter('replan_on_move').value
         self.position_change_threshold = self.get_parameter('position_change_threshold').value
         self.orientation_change_threshold = self.get_parameter('orientation_change_threshold').value
         
-        # Velocity and time step parameters for motion model
+        # NEW: Get parameters for handling unexplored areas
+        self.treat_unknown_as_obstacle = self.get_parameter('treat_unknown_as_obstacle').value
+        self.unknown_cost_multiplier = self.get_parameter('unknown_cost_multiplier').value
+        self.publish_debug_viz = self.get_parameter('publish_debug_viz').value
+        self.min_explored_percentage = self.get_parameter('min_explored_percentage').value
+        
+        # Constants for motion model
         self.velocity = 1.0  # m/s
         self.dt = 1.0  # s
         
@@ -76,7 +90,7 @@ class HybridAStarPlanner(Node):
         self.goal_pose = None
         self.latest_path = None
         
-        # Internal map representation using dictionary
+        # Internal map representation
         self.cost_map = {
             'resolution': 0.5,  # meters per grid cell
             'width': 500,
@@ -98,6 +112,14 @@ class HybridAStarPlanner(Node):
             '/hybrid_astar_path', 
             qos_profile
         )
+        
+        # NEW: Add debug visualization publishers
+        if self.publish_debug_viz:
+            self.debug_map_pub = self.create_publisher(
+                OccupancyGrid,
+                '/hybrid_astar_debug',
+                qos_profile
+            )
         
         # Subscribers
         self.pose_sub = self.create_subscription(
@@ -126,7 +148,7 @@ class HybridAStarPlanner(Node):
         )
         
         self.get_logger().info('Hybrid A* Planner node initialized')
-        self.get_logger().info(f'Planning with grid size: {self.grid_size}, max iterations: {self.max_iterations}, motion resolution: {self.motion_resolution}, angle resolution: {self.angle_resolution}, heuristic weight: {self.heuristic_weight}')
+        self.get_logger().info(f'Planning with grid size: {self.grid_size}')
         
         # Display full configuration
         self.config()
@@ -154,15 +176,40 @@ class HybridAStarPlanner(Node):
         self.cost_map['data'] = np.array(msg.data).flatten()
         
         self.get_logger().debug('Received map update')
-        
-        # Log map configuration when received
-        if self.get_logger().get_effective_level() <= 20:  # INFO level or more verbose
-            self.config()
     
     def heuristic(self, a, b):
-        """Calculate heuristic distance between nodes"""
-        # Apply heuristic weight to make A* more greedy (faster) or more optimal (slower)
-        return self.heuristic_weight * np.hypot(a.x - b.x, a.y - b.y)
+        """Calculate heuristic distance between nodes with unexplored penalty"""
+        # Base euclidean distance
+        base_cost = self.heuristic_weight * np.hypot(a.x - b.x, a.y - b.y)
+        
+        # NEW: Add penalty for path through unexplored area
+        if self.is_unexplored(a.x, a.y):
+            base_cost *= self.unknown_cost_multiplier
+            
+        return base_cost
+    
+    # NEW: Add method to check if a cell is unexplored
+    def is_unexplored(self, x, y):
+        """Check if a point is unexplored (-1) in the map"""
+        if self.map_data is None:
+            return True
+            
+        # Convert world coordinates to grid coordinates
+        grid_x = int((x - self.map_data.info.origin.position.x) / self.map_data.info.resolution)
+        grid_y = int((y - self.map_data.info.origin.position.y) / self.map_data.info.resolution)
+        
+        # Check if in bounds
+        if not (0 <= grid_x < self.map_data.info.width and 
+                0 <= grid_y < self.map_data.info.height):
+            return True
+            
+        # Get index in the occupancy grid
+        index = grid_y * self.map_data.info.width + grid_x
+        if index >= len(self.map_data.data):
+            return True
+            
+        # -1 (255 in uint8) represents unexplored space
+        return self.map_data.data[index] == -1
     
     def is_in_bounds(self, x, y):
         """Check if coordinates are within map boundaries"""
@@ -194,7 +241,12 @@ class HybridAStarPlanner(Node):
             if index >= len(self.cost_map['data']):
                 return True
                 
-            return self.cost_map['data'][index] >= self.obstacle_threshold
+            # NEW: Check for unexplored cells
+            cell_value = self.cost_map['data'][index]
+            if cell_value == -1 and self.treat_unknown_as_obstacle:
+                return True
+                
+            return cell_value >= self.obstacle_threshold
         
         # Fall back to ROS map_data if internal map isn't available
         if self.map_data is None:
@@ -209,225 +261,316 @@ class HybridAStarPlanner(Node):
                 0 <= grid_y < self.map_data.info.height):
             return True
             
-        # Get index in the occupancy grid data
+        # Get index in the occupancy grid
         index = grid_y * self.map_data.info.width + grid_x
         if index >= len(self.map_data.data):
             return True
             
-        return self.map_data.data[index] >= self.obstacle_threshold
+        # NEW: Check for unexplored cells
+        cell_value = self.map_data.data[index]
+        if cell_value == -1 and self.treat_unknown_as_obstacle:
+            return True
+            
+        return cell_value >= self.obstacle_threshold
     
     def kinematic_motion(self, node, steering, velocity=None, dt=None):
-        """Apply vehicle kinematic model"""
-        # Use provided values or defaults from class variables
-        velocity = velocity if velocity is not None else self.velocity
-        dt = dt if dt is not None else self.dt
-        
+        """Use bicycle model for vehicle motion"""
+        if velocity is None:
+            velocity = self.velocity
+            
+        if dt is None:
+            dt = self.dt
+            
+        # Calculate next state using bicycle model
         x = node.x + velocity * np.cos(node.theta) * dt
         y = node.y + velocity * np.sin(node.theta) * dt
-        theta = node.theta + (velocity / self.wheelbase) * np.tan(steering) * dt
+        theta = node.theta + velocity * np.tan(steering) / self.wheelbase * dt
         
         # Normalize theta to [-pi, pi]
-        theta = np.arctan2(np.sin(theta), np.cos(theta))
+        theta = self.normalize_angle(theta)
         
-        return Node2D(x, y, theta, node.cost + dt, parent=node)
+        return x, y, theta
     
     def get_successors(self, node):
-        """Generate successor nodes by applying different steering angles"""
-        motions = []
+        """Generate successor nodes for a given node"""
+        successors = []
         
-        # Try different steering angles based on motion_resolution parameter
-        for delta in np.linspace(-0.5, 0.5, self.motion_resolution):  # Steering angles
-            # Forward motion
-            next_node = self.kinematic_motion(node, delta)
-            if not self.is_obstacle(next_node.x, next_node.y):
-                motions.append(next_node)
+        # Define different steering angles
+        steering_angles = np.linspace(-np.pi/4, np.pi/4, self.motion_resolution)
+        
+        for steering in steering_angles:
+            # Apply motion model to get next state
+            x, y, theta = self.kinematic_motion(node, steering)
+            
+            # Skip if out of bounds or in collision
+            if not self.is_in_bounds(x, y) or self.is_obstacle(x, y):
+                continue
                 
-            # Reverse motion (optional, can be enabled for more complex maneuvers)
-            # next_node = self.kinematic_motion(node, delta, -self.velocity)
-            # if not self.is_obstacle(next_node.x, next_node.y):
-            #     motions.append(next_node)
-                
-        return motions
+            # Calculate cost (distance traveled plus steering penalty)
+            cost = node.cost + np.hypot(x - node.x, y - node.y)
+            cost += 0.1 * abs(steering)  # Small penalty for steering
+            
+            # Create new successor node
+            successor = Node2D(x, y, theta, cost, parent=node)
+            successors.append(successor)
+            
+        return successors
     
     def plan(self, start_node, goal_node):
         """Hybrid A* path planning algorithm"""
-        if self.map_data is None:
-            self.get_logger().warning('No map data available for planning')
+        if start_node is None or goal_node is None:
+            self.get_logger().warn("Cannot plan: start or goal is None")
             return None
             
+        # Initialize data structures
         open_set = PriorityQueue()
-        open_set.put((0, start_node))
+        closed_set = {}
         
-        # Dictionary to track visited nodes
-        # The key is a tuple of (grid_x, grid_y, discretized_theta)
-        # to handle continuous state space with discrete representation
-        visited = {}
+        # Add start node to open set
+        start_node.f_cost = start_node.cost + self.heuristic(start_node, goal_node)
+        open_set.put((start_node.f_cost, id(start_node), start_node))
         
-        # Use max_iterations parameter to control search time
+        # Initialize for debugging
         iterations = 0
-        
-        # Measure planning time for performance reporting
         start_time = time.time()
         
+        # Perform A* search
         while not open_set.empty() and iterations < self.max_iterations:
             iterations += 1
             
-            _, current = open_set.get()
-            
-            # Discretize state for checking visited nodes
-            x_grid = int(current.x / self.grid_size)
-            y_grid = int(current.y / self.grid_size)
-            
-            # Use angle_resolution parameter to control how finely angles are discretized
-            theta_grid = int(current.theta / (np.pi/self.angle_resolution))  # discretized angle
-            state_key = (x_grid, y_grid, theta_grid)
-            
-            # Skip if this discretized state was already visited with lower cost
-            if state_key in visited and visited[state_key] <= current.cost:
-                continue
-                
-            # Mark as visited
-            visited[state_key] = current.cost
+            # Get node with lowest f_cost
+            _, _, current = open_set.get()
             
             # Check if goal reached
-            if np.hypot(current.x - goal_node.x, current.y - goal_node.y) < 1.0:
-                planning_time = time.time() - start_time
-                self.get_logger().info(f'Path found in {iterations} iterations ({planning_time:.3f} sec)')
+            goal_dist = np.hypot(current.x - goal_node.x, current.y - goal_node.y)
+            if goal_dist < 2.0 * self.grid_size:
+                self.get_logger().info(f"Path found in {iterations} iterations, {time.time() - start_time:.2f} seconds")
                 
-                # Extract path
-                path = []
-                node = current
-                while node:
-                    path.append((node.x, node.y, node.theta))
-                    node = node.parent
-                    
-                return path[::-1]  # Reverse to get path from start to goal
+                # NEW: Verify that path doesn't go through too many unexplored cells
+                path = self.backtrack_path(current)
+                if path and self.is_path_safe(path):
+                    return path
+                else:
+                    self.get_logger().warn("Path goes through too many unexplored cells, continuing search")
+                    # Continue searching for a better path
+            
+            # Mark as visited
+            grid_x = int(current.x / self.grid_size)
+            grid_y = int(current.y / self.grid_size)
+            grid_theta = int(current.theta / (2 * np.pi / self.angle_resolution))
+            state_key = (grid_x, grid_y, grid_theta)
+            
+            # Skip if already visited
+            if state_key in closed_set and closed_set[state_key] <= current.cost:
+                continue
+                
+            closed_set[state_key] = current.cost
             
             # Generate successors
-            for neighbor in self.get_successors(current):
-                h = self.heuristic(neighbor, goal_node)
-                open_set.put((neighbor.cost + h, neighbor))
-            
-            self.get_logger().debug(f'Current node: x={current.x}, y={current.y}, theta={current.theta}, cost={current.cost}')
+            for successor in self.get_successors(current):
+                # Skip if in collision or already explored with lower cost
+                grid_x = int(successor.x / self.grid_size)
+                grid_y = int(successor.y / self.grid_size)
+                grid_theta = int(successor.theta / (2 * np.pi / self.angle_resolution))
+                state_key = (grid_x, grid_y, grid_theta)
+                
+                if state_key in closed_set and closed_set[state_key] <= successor.cost:
+                    continue
+                    
+                # Update f_cost and add to open set
+                successor.f_cost = successor.cost + self.heuristic(successor, goal_node)
+                open_set.put((successor.f_cost, id(successor), successor))
         
-        planning_time = time.time() - start_time
-        self.get_logger().warning(f'Path planning failed after {iterations} iterations ({planning_time:.3f} sec)')
+        self.get_logger().warn(f"Failed to find path after {iterations} iterations")
         return None
     
+    # NEW: Add method to check if path is safe (not too many unexplored cells)
+    def is_path_safe(self, path):
+        """Check if path goes through a reasonable amount of explored cells"""
+        if not path:
+            return False
+            
+        total_cells = len(path)
+        unexplored_cells = 0
+        
+        for pose in path:
+            x, y = pose.pose.position.x, pose.pose.position.y
+            if self.is_unexplored(x, y):
+                unexplored_cells += 1
+        
+        explored_percentage = 100 * (total_cells - unexplored_cells) / total_cells
+        self.get_logger().info(f"Path explored percentage: {explored_percentage:.1f}%")
+        
+        return explored_percentage >= self.min_explored_percentage
+    
+    def backtrack_path(self, node):
+        """Reconstruct path by following parent pointers"""
+        if node is None:
+            return None
+            
+        path = []
+        current = node
+        
+        while current is not None:
+            # Create PoseStamped for current node
+            pose = PoseStamped()
+            pose.header.frame_id = self.map_frame_id
+            pose.header.stamp = self.get_clock().now().to_msg()
+            pose.pose.position.x = current.x
+            pose.pose.position.y = current.y
+            pose.pose.position.z = 0.0
+            
+            # Convert theta to quaternion
+            pose.pose.orientation.z = np.sin(current.theta / 2.0)
+            pose.pose.orientation.w = np.cos(current.theta / 2.0)
+            
+            path.append(pose)
+            current = current.parent
+            
+        # Reverse to get start-to-goal order
+        path.reverse()
+        return path
+    
     def get_current_state(self):
-        """Extract current vehicle position and orientation"""
-        if not self.current_pose:
+        """Get current vehicle state as a Node2D"""
+        if self.current_pose is None:
             return None
             
         # Extract position
         x = self.current_pose.pose.position.x
         y = self.current_pose.pose.position.y
         
-        # Extract orientation (yaw) from quaternion
-        qx = self.current_pose.pose.orientation.x
-        qy = self.current_pose.pose.orientation.y
+        # Extract orientation (assuming 2D rotation around z-axis)
         qz = self.current_pose.pose.orientation.z
         qw = self.current_pose.pose.orientation.w
+        theta = 2.0 * np.arctan2(qz, qw)
         
-        # Convert quaternion to Euler angles
-        siny_cosp = 2.0 * (qw * qz + qx * qy)
-        cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
-        yaw = math.atan2(siny_cosp, cosy_cosp)
-        
-        return Node2D(x, y, yaw, 0.0)
+        return Node2D(x, y, theta, 0.0)
     
     def get_goal_state(self):
-        """Extract goal position and orientation"""
-        if not self.goal_pose:
+        """Get goal state as a Node2D"""
+        if self.goal_pose is None:
             return None
             
         # Extract position
         x = self.goal_pose.pose.position.x
         y = self.goal_pose.pose.position.y
         
-        # Extract orientation (yaw) from quaternion
-        qx = self.goal_pose.pose.orientation.x
-        qy = self.goal_pose.pose.orientation.y
+        # Extract orientation (assuming 2D rotation around z-axis)
         qz = self.goal_pose.pose.orientation.z
         qw = self.goal_pose.pose.orientation.w
+        theta = 2.0 * np.arctan2(qz, qw)
         
-        # Convert quaternion to Euler angles
-        siny_cosp = 2.0 * (qw * qz + qx * qy)
-        cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
-        yaw = math.atan2(siny_cosp, cosy_cosp)
-        
-        return Node2D(x, y, yaw, 0.0)
+        return Node2D(x, y, theta, 0.0)
     
     def path_to_msg(self, path):
         """Convert path to ROS Path message"""
         if not path:
             return None
             
+        # Create Path message
         path_msg = Path()
-        path_msg.header.stamp = self.get_clock().now().to_msg()
         path_msg.header.frame_id = self.map_frame_id
+        path_msg.header.stamp = self.get_clock().now().to_msg()
         
-        for x, y, theta in path:
-            pose = PoseStamped()
-            pose.header = path_msg.header
-            pose.pose.position.x = x
-            pose.pose.position.y = y
-            pose.pose.position.z = 0.0
-            
-            # Convert theta to quaternion
-            cy = math.cos(theta * 0.5)
-            sy = math.sin(theta * 0.5)
-            
-            pose.pose.orientation.x = 0.0
-            pose.pose.orientation.y = 0.0
-            pose.pose.orientation.z = sy
-            pose.pose.orientation.w = cy
-            
-            path_msg.poses.append(pose)
-            
+        # Add poses to path
+        path_msg.poses = path
+        
         return path_msg
     
+    # NEW: Add debug visualization function
+    def publish_debug_map(self):
+        """Publish a debug map showing explored/unexplored areas"""
+        if not self.publish_debug_viz or self.map_data is None:
+            return
+            
+        # Create a copy of the map
+        debug_map = OccupancyGrid()
+        debug_map.header = self.map_data.header
+        debug_map.info = self.map_data.info
+        
+        # Fill debug map - make unexplored areas clearly visible
+        debug_data = np.array(self.map_data.data)
+        
+        # Mark unexplored cells with a distinctive value (e.g., 80)
+        debug_data[debug_data == -1] = 80
+        
+        # If we have a path, mark it on the debug map
+        if self.latest_path is not None:
+            for pose in self.latest_path.poses:
+                x, y = pose.pose.position.x, pose.pose.position.y
+                
+                # Convert to grid coordinates
+                grid_x = int((x - self.map_data.info.origin.position.x) / self.map_data.info.resolution)
+                grid_y = int((y - self.map_data.info.origin.position.y) / self.map_data.info.resolution)
+                
+                # Mark path cells with a distinctive value (e.g., 100)
+                if 0 <= grid_x < self.map_data.info.width and 0 <= grid_y < self.map_data.info.height:
+                    index = grid_y * self.map_data.info.width + grid_x
+                    if index < len(debug_data):
+                        debug_data[index] = 100
+        
+        # Set the data in the debug map
+        debug_map.data = debug_data.tolist()
+        
+        # Publish the debug map
+        self.debug_map_pub.publish(debug_map)
+    
     def planning_callback(self):
-        """Main planning loop"""
-        if not self.current_pose or not self.goal_pose or not self.map_data:
+        """Timer callback for path planning"""
+        # Check if we have all necessary data
+        if self.map_data is None:
+            self.get_logger().warn("No map data available")
+            return
+            
+        if self.current_pose is None:
+            self.get_logger().warn("No current pose available")
+            return
+            
+        if self.goal_pose is None:
+            self.get_logger().warn("No goal pose available")
             return
         
-        # Get current state
-        current_state = self.get_current_state()
-        if not current_state:
-            return
+        # Check if we need to replan
+        need_replanning = False
         
-        # Check if we need to replan based on movement
-        should_replan = True
+        # Always plan on first run
+        if self.latest_path is None:
+            need_replanning = True
+        
+        # Check if we've moved significantly
         if self.replan_on_move and self.last_planned_position is not None:
-            current_pos = (current_state.x, current_state.y)
-            current_orientation = current_state.theta
+            current_x = self.current_pose.pose.position.x
+            current_y = self.current_pose.pose.position.y
             
             # Calculate position change
-            position_change = math.sqrt(
-                (current_pos[0] - self.last_planned_position[0]) ** 2 +
-                (current_pos[1] - self.last_planned_position[1]) ** 2
+            position_change = np.hypot(
+                current_x - self.last_planned_position[0],
+                current_y - self.last_planned_position[1]
             )
             
-            # Calculate orientation change (handle wrap-around)
-            orientation_change = abs(self.normalize_angle(current_orientation - self.last_planned_orientation))
+            # Calculate orientation change
+            current_qz = self.current_pose.pose.orientation.z
+            current_qw = self.current_pose.pose.orientation.w
+            current_theta = 2.0 * np.arctan2(current_qz, current_qw)
             
-            # Decide if we need to replan
-            if position_change < self.position_change_threshold and orientation_change < self.orientation_change_threshold:
-                should_replan = False
+            orientation_change = abs(self.normalize_angle(
+                current_theta - self.last_planned_orientation
+            ))
             
-        if not should_replan and self.latest_path:
-            # Just publish the existing path again
-            self.path_pub.publish(self.latest_path)
-            return
+            # Check if changes exceed thresholds
+            if (position_change > self.position_change_threshold or
+                orientation_change > self.orientation_change_threshold):
+                need_replanning = True
         
-        # Continue with normal planning...
-        
-        # Get current and goal states
-        start_node = current_state
-        goal_node = self.get_goal_state()
-        
-        if start_node and goal_node:
+        # Perform planning if needed
+        if need_replanning:
+            self.get_logger().info("Planning new path")
+            
+            # Get start and goal states
+            start_node = self.get_current_state()
+            goal_node = self.get_goal_state()
+            
             # Plan path
             path = self.plan(start_node, goal_node)
             
@@ -435,81 +578,54 @@ class HybridAStarPlanner(Node):
                 # Convert to ROS message
                 path_msg = self.path_to_msg(path)
                 
-                if path_msg:
-                    # Save latest path
-                    self.latest_path = path_msg
-                    
-                    # Publish path
-                    self.path_pub.publish(path_msg)
-                    
-                    # Calculate path length
-                    path_length = 0
-                    for i in range(1, len(path_msg.poses)):
-                        p1 = path_msg.poses[i-1].pose.position
-                        p2 = path_msg.poses[i].pose.position
-                        path_length += math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2)
-                    
-                    self.get_logger().info(f'Published path with {len(path_msg.poses)} points, length: {path_length:.2f}m')
-
-        # After successful planning, update the last planned position and orientation
-        self.last_planned_position = (current_state.x, current_state.y)
-        self.last_planned_orientation = current_state.theta
+                # Publish path
+                self.path_pub.publish(path_msg)
+                
+                # Update latest path and planning position
+                self.latest_path = path_msg
+                self.last_planned_position = (
+                    self.current_pose.pose.position.x,
+                    self.current_pose.pose.position.y
+                )
+                current_qz = self.current_pose.pose.orientation.z
+                current_qw = self.current_pose.pose.orientation.w
+                self.last_planned_orientation = 2.0 * np.arctan2(current_qz, current_qw)
+                
+                self.get_logger().info("Published new path")
+            else:
+                self.get_logger().warn("Failed to find path")
+        
+        # NEW: Publish debug visualization
+        self.publish_debug_map()
     
     def normalize_angle(self, angle):
-        """Normalize angle to be between -π and π"""
-        while angle > math.pi:
-            angle -= 2.0 * math.pi
-        while angle < -math.pi:
-            angle += 2.0 * math.pi
+        """Normalize angle to [-pi, pi]"""
+        while angle > np.pi:
+            angle -= 2.0 * np.pi
+        while angle < -np.pi:
+            angle += 2.0 * np.pi
         return angle
     
     def config(self):
-        """Display the current configuration of the Hybrid A* planner"""
-        self.get_logger().info("Hybrid A* Config:")
-        self.get_logger().info(f"  Grid size: {self.grid_size}")
-        self.get_logger().info(f"  Velocity: {self.velocity} m/s")
-        self.get_logger().info(f"  Time step: {self.dt} s")
-        self.get_logger().info(f"  Steering samples: {self.motion_resolution}")
+        """Log configuration parameters"""
+        self.get_logger().info("Hybrid A* Planner Configuration:")
+        self.get_logger().info(f"  Grid size: {self.grid_size} m")
+        self.get_logger().info(f"  Wheelbase: {self.wheelbase} m")
         self.get_logger().info(f"  Obstacle threshold: {self.obstacle_threshold}")
-        self.get_logger().info(f"  Map dimensions: {self.cost_map['width']}x{self.cost_map['height']}")
-        self.get_logger().info(f"  Map resolution: {self.cost_map['resolution']} m/cell")
-
-    def update_map_from_dict(self, map_data_dict):
-        """Update the internal cost map directly from a dictionary"""
-        if not isinstance(map_data_dict, dict):
-            self.get_logger().error("Map data must be a dictionary")
-            return False
-            
-        required_keys = ['resolution', 'width', 'height', 'origin', 'data']
-        if not all(key in map_data_dict for key in required_keys):
-            self.get_logger().error("Map data missing required keys")
-            return False
-            
-        # Update our internal map representation
-        self.cost_map['resolution'] = map_data_dict['resolution']
-        self.cost_map['width'] = map_data_dict['width'] 
-        self.cost_map['height'] = map_data_dict['height']
-        self.cost_map['origin'] = map_data_dict['origin']
-        
-        # Ensure data is a flattened numpy array
-        if isinstance(map_data_dict['data'], np.ndarray):
-            self.cost_map['data'] = map_data_dict['data'].flatten()
-        else:
-            self.cost_map['data'] = np.array(map_data_dict['data']).flatten()
-            
-        self.get_logger().info(f"Updated internal cost map: {self.cost_map['width']}x{self.cost_map['height']} cells, {self.cost_map['resolution']}m/cell")
-        
-        # Display full configuration
-        self.config()
-        
-        return True
+        self.get_logger().info(f"  Max iterations: {self.max_iterations}")
+        self.get_logger().info(f"  Motion resolution: {self.motion_resolution}")
+        self.get_logger().info(f"  Angle resolution: {self.angle_resolution}")
+        self.get_logger().info(f"  Heuristic weight: {self.heuristic_weight}")
+        self.get_logger().info(f"  Treat unknown as obstacle: {self.treat_unknown_as_obstacle}")
+        self.get_logger().info(f"  Unknown cost multiplier: {self.unknown_cost_multiplier}")
+        self.get_logger().info(f"  Min explored percentage: {self.min_explored_percentage}%")
 
 def main(args=None):
     rclpy.init(args=args)
-    node = HybridAStarPlanner()
-    rclpy.spin(node)
-    node.destroy_node()
+    planner = HybridAStarPlanner()
+    rclpy.spin(planner)
+    planner.destroy_node()
     rclpy.shutdown()
 
 if __name__ == '__main__':
-    main() 
+    main()

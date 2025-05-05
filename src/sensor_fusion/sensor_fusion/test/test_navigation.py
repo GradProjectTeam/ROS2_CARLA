@@ -36,9 +36,9 @@ class NavigationTester(Node):
         self.declare_parameter('use_filtered_yaw', True)
         self.declare_parameter('yaw_filter_size', 3)  # Smaller filter size for faster response (was 5)
         self.declare_parameter('yaw_weight', 0.8)
-        self.declare_parameter('goal_distance', 5.0)
+        self.declare_parameter('goal_distance', 3.0)
         self.declare_parameter('yaw_offset', 1.5, yaw_offset_descriptor)  # Default 1.5 radians (approximately 90 degrees)
-        self.declare_parameter('publish_rate', 20.0)  # Higher publish rate (was 10Hz, now 20Hz) 
+        self.declare_parameter('publish_rate', 30.0)  # Higher publish rate (was 10Hz, now 20Hz) 
         
         # Get parameters
         self.imu_topic = self.get_parameter('imu_topic').value

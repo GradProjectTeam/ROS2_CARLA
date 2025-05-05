@@ -54,6 +54,10 @@ class LidarRealtimeMapper(Node):
         self.declare_parameter('vehicle_frame_id', 'base_link') # Vehicle frame ID
         self.declare_parameter('map_frame_id', 'map')       # Map frame ID
         
+        # New parameters for all-white map
+        self.declare_parameter('initialize_as_free', True)  # Initialize all cells as free space
+        self.declare_parameter('unknown_to_free', True)     # Treat unknown cells as free space
+        
         # Bayesian update weights - more decisive for real-time
         self.declare_parameter('hit_weight', 0.95)          # Very confident about hits
         self.declare_parameter('miss_weight', 0.05)         # Confident about free space
@@ -82,6 +86,10 @@ class LidarRealtimeMapper(Node):
         self.vehicle_frame_id = self.get_parameter('vehicle_frame_id').value
         self.map_frame_id = self.get_parameter('map_frame_id').value
         
+        # New parameters for all-white map
+        self.initialize_as_free = self.get_parameter('initialize_as_free').value
+        self.unknown_to_free = self.get_parameter('unknown_to_free').value
+        
         # Bayesian update weights
         self.hit_weight = self.get_parameter('hit_weight').value
         self.miss_weight = self.get_parameter('miss_weight').value
@@ -102,8 +110,9 @@ class LidarRealtimeMapper(Node):
                 self.map_width = calculated_width
                 self.map_height = calculated_height
         
-        # Initialize real-time map with all unknown (50)
-        self.realtime_map = np.ones((self.map_height, self.map_width), dtype=np.int8) * 50
+        # Initialize real-time map with all free (0) or unknown (50) based on parameters
+        self.realtime_map = np.zeros((self.map_height, self.map_width), dtype=np.int8) if self.initialize_as_free else \
+                          (np.ones((self.map_height, self.map_width), dtype=np.int8) * 50)
         
         # Hit count map - tracks confidence in each cell
         self.hit_count_map = np.zeros((self.map_height, self.map_width), dtype=np.float32)
@@ -236,22 +245,21 @@ class LidarRealtimeMapper(Node):
             time_diff = current_time - self.last_update_time
             
             # Apply decay only to cells with a time difference
-            mask = (time_diff > 0) & (self.realtime_map != 50)  # Don't decay unknown cells
+            # Only decay cells that are obstacles (100), since free space (0) is our default
+            mask = (time_diff > 0) & (self.realtime_map == 100)
             
             if np.any(mask):
-                # Calculate decay factor
-                decay_factor = np.exp(-self.decay_rate * time_diff)
-                decay_factor = np.clip(decay_factor, 0.0, 1.0)
+                # For binary map, if enough time has passed, convert obstacles back to free space
+                clear_mask = (time_diff[mask] > self.decay_rate)
+                indices = np.where(mask)
                 
-                # Apply decay to hit count
-                # Move values toward 'prior_weight' based on decay
-                delta = self.realtime_map[mask].astype(np.float32) - 50
-                self.realtime_map[mask] = np.clip(
-                    50 + delta * decay_factor[mask], 0, 100
-                ).astype(np.int8)
-                
-                # Decay hit count map also
-                self.hit_count_map[mask] *= decay_factor[mask]
+                # Clear obstacles that have exceeded decay time
+                for i in range(len(indices[0])):
+                    idx_y, idx_x = indices[0][i], indices[1][i]
+                    if clear_mask[i]:
+                        self.realtime_map[idx_y, idx_x] = 0
+                        self.hit_count_map[idx_y, idx_x] = 0
+                        self.map_changed = True
     
     def process_data(self):
         """Process LiDAR data and update the real-time map"""
@@ -478,41 +486,38 @@ class LidarRealtimeMapper(Node):
             self.get_logger().error(f"Error updating map from cubes: {str(e)}")
     
     def update_cells(self, cells_to_update):
-        """Apply updates to the map"""
+        """Update the map cells based on LiDAR data"""
         with self.map_lock:
             current_time = time.time()
             
-            # Process each cell update
-            for y, x, is_occupied in cells_to_update:
-                # Skip if out of bounds
-                if not (0 <= x < self.map_width and 0 <= y < self.map_height):
+            for cell in cells_to_update:
+                y, x, is_occupied = cell
+                
+                # Skip out of bounds cells
+                if x < 0 or x >= self.map_width or y < 0 or y >= self.map_height:
                     continue
                 
                 # Update last update time
                 self.last_update_time[y, x] = current_time
                 
-                # Current probability value (0-100)
+                # Get current values
                 current_value = self.realtime_map[y, x]
                 current_count = self.hit_count_map[y, x]
                 
-                # Apply Bayesian update
                 if is_occupied:
-                    # Cell is occupied - increase value toward hit_weight
+                    # Cell is occupied - for binary map, make it 100 (black)
+                    new_value = 100
                     new_count = current_count + 1.0
-                    
-                    # Fast direct hit for real-time responsiveness
-                    new_value = min(current_value + 20, 100)
                 else:
-                    # Cell is free - decrease value toward miss_weight
+                    # Cell is free - for binary map, make it 0 (white)
+                    new_value = 0
                     new_count = max(current_count - 0.3, 0.0)
-                    
-                    # Fast direct miss for real-time responsiveness
-                    new_value = max(current_value - 10, 0)
                 
-                # Update maps
-                self.realtime_map[y, x] = int(new_value)
-                self.hit_count_map[y, x] = new_count
-                self.map_changed = True
+                # Update maps only if value changed
+                if current_value != new_value:
+                    self.realtime_map[y, x] = int(new_value)
+                    self.hit_count_map[y, x] = new_count
+                    self.map_changed = True
     
     def bresenham_line(self, y0, x0, y1, x1):
         """Bresenham's line algorithm for raycasting"""
@@ -560,8 +565,16 @@ class LidarRealtimeMapper(Node):
             map_msg.info.origin.position.y = self.map_origin_y
             map_msg.info.origin.orientation.w = 1.0
             
+            # Create a copy of the map data
+            map_data = self.realtime_map.copy()
+            
+            # Convert unknown cells (-1 or 50) to free space (0) if unknown_to_free is True
+            if self.unknown_to_free:
+                map_data[map_data == 50] = 0
+                map_data[map_data == -1] = 0
+            
             # Set map data
-            map_msg.data = self.realtime_map.flatten().tolist()
+            map_msg.data = map_data.flatten().tolist()
             
             # Publish map
             self.map_publisher.publish(map_msg)

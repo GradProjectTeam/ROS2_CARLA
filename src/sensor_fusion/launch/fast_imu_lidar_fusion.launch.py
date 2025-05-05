@@ -11,125 +11,411 @@ def generate_launch_description():
     # Get the package directory
     pkg_dir = get_package_share_directory('sensor_fusion')
     
-    # Create transform publisher nodes with higher publish frequency for faster updates
+    # =========== TRANSFORM CONFIGURATION ===========
+    # These transforms establish the complete TF tree for the robot
+    # world → map → base_link → imu_link → lidar_link
+    
+    # Root transform: world to map
+    # This provides a fixed reference frame for global positioning
     world_to_map_node = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_world_to_map',
         arguments=['0', '0', '0', '0', '0', '0', 'world', 'map'],
-        parameters=[{'use_sim_time': False, 'publish_frequency': 150.0}], # Increased frequency for transforms
+        parameters=[{
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'publish_frequency': 200.0  # Increased frequency for transform stability with C++ data
+        }],
     )
     
-    # Add back the map_to_base_link static transform, but with a conditional option
-    # This provides initial connectivity until the dynamic transform from imu_lidar_yaw_fusion takes over
+    # Map to base_link transform
+    # This is a fallback static transform until the dynamic one from imu_lidar_yaw_fusion takes over
     map_to_base_link_node = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        name='tf_map_to_base_link',
+        name='tf_map_to_base_link_static',
         arguments=['0', '0', '0', '0', '0', '0', 'map', 'base_link'],
-        parameters=[{'use_sim_time': False, 'publish_frequency': 150.0}], # Increased frequency for transforms
+        parameters=[{
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'publish_frequency': 200.0  # Match other transform frequencies
+        }],
     )
     
+    # Base to IMU transform
+    # This represents the physical mounting position of the IMU on the robot
     base_to_imu_node = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_base_to_imu',
-        arguments=['0', '0', '0.1', '0', '0', '0', 'base_link', 'imu_link'],
-        parameters=[{'use_sim_time': False, 'publish_frequency': 150.0}], # Increased frequency for transforms
+        arguments=[
+            '0',    # X offset (forward/back)
+            '0',    # Y offset (left/right)
+            '0.1',  # Z offset (up/down) - IMU is 10cm above the base
+            '0',    # Roll (rotation around X)
+            '0',    # Pitch (rotation around Y)
+            '0',    # Yaw (rotation around Z)
+            'base_link', 
+            'imu_link'
+        ],
+        parameters=[{
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'publish_frequency': 200.0
+        }],
     )
     
+    # IMU to LiDAR transform
+    # This represents the physical mounting position of the LiDAR relative to the IMU
     imu_to_lidar_node = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='tf_imu_to_lidar',
-        arguments=['0', '0', '0.2', '0', '0', '0', 'imu_link', 'lidar_link'],
-        parameters=[{'use_sim_time': False, 'publish_frequency': 150.0}], # Increased frequency for transforms
+        arguments=[
+            LaunchConfiguration('lidar_x_offset'),    # X offset (forward/back)
+            LaunchConfiguration('lidar_y_offset'),    # Y offset (left/right)
+            LaunchConfiguration('lidar_z_offset'),    # Z offset (up/down)
+            LaunchConfiguration('lidar_roll'),        # Roll (rotation around X)
+            LaunchConfiguration('lidar_pitch'),       # Pitch (rotation around Y)
+            LaunchConfiguration('lidar_yaw'),         # Yaw (rotation around Z)
+            'imu_link', 
+            'lidar_link'
+        ],
+        parameters=[{
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'publish_frequency': 200.0
+        }],
     )
     
-    # Create the fused mapper node - with shorter delay for TF to be established
+    # IMU Visualization Node - optimized for C++ data integration
+    imu_euler_visualizer_node = Node(
+        package='sensor_fusion',
+        executable='imu_euler_visualizer',
+        name='imu_euler_visualizer',
+        parameters=[{
+            'tcp_ip': LaunchConfiguration('imu_tcp_ip'),
+            'tcp_port': LaunchConfiguration('imu_tcp_port'),
+            'reconnect_interval': 1.0,                  # Faster reconnects for C++ stream
+            'frame_id': 'imu_link',
+            'world_frame_id': 'world',
+            'filter_window_size': 2,                    # Small filter for faster response
+            'queue_size': 20,                           # Larger queue for C++ data bursts
+            'publish_rate': 200.0,                      # Higher rate for C++ data
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'socket_buffer_size': 65536,                # Larger socket buffer for C++ data
+            'enable_bias_correction': True,             # Enable IMU bias correction for more accurate data
+            'enable_complementary_filter': True,        # Use complementary filter for more stable orientation
+            'zero_velocity_threshold': 0.02,            # Add zero velocity detection for better stationary stability
+        }],
+        output='screen'
+    )
+    
+    # LiDAR Point Cloud Visualization Node - adjusted for updated LiDAR configuration
+    lidar_listener_node = Node(
+        package='sensor_fusion',
+        executable='lidar_listener_clusters_2',
+        name='lidar_cube_visualizer',
+        parameters=[{
+            'tcp_ip': LaunchConfiguration('lidar_tcp_ip'),
+            'tcp_port': LaunchConfiguration('lidar_tcp_port'),
+            'point_size': LaunchConfiguration('point_size'),
+            'center_size': LaunchConfiguration('center_size'),
+            'use_convex_hull': True,
+            'use_point_markers': False,  
+            'use_cluster_stats': True,   
+            'verbose_logging': False,    
+            'cube_alpha': 0.6,                         # Increased for better visibility in large map
+            
+            # C++ Integration parameters - optimized for large map processing
+            'socket_buffer_size': 524288,              # DOUBLED buffer size for larger data streams (512KB)
+            'enable_data_validation': True,
+            'reconnect_on_error': True,
+            'reconnect_cooldown': 0.5,
+            'packet_timeout_ms': 120,                  # Increased timeout for larger data packets
+            'enable_async_reception': True,
+            'max_packet_size': 131072,                 # DOUBLED for larger data chunks (128KB)
+            'enable_zero_copy_reception': True,
+            'apply_cpp_timestamp_correction': True,
+            
+            # UPDATED C++ Statistical Outlier Removal parameters - MATCHED WITH UPDATED C++ CODE
+            'sor_std_dev_multiplier': 4.2,             # Match updated C++ SOR parameters
+            'sor_neighbor_radius': 0.7,                # Match updated C++ neighbor radius
+            'sor_min_neighbors': 12,                   # Match updated C++ min neighbors
+            'voxel_leaf_size': 0.15,                   # Match updated C++ voxel grid size
+            
+            # UPDATED C++ RANSAC Ground Plane parameters - MATCHED WITH UPDATED C++ CODE
+            'ransac_iterations': 200,                  # Match updated C++ RANSAC iterations
+            'ransac_distance_threshold': 0.22,         # Match updated C++ RANSAC distance threshold
+            
+            # UPDATED C++ Euclidean Clustering parameters - MATCHED WITH UPDATED C++ CODE
+            'max_cluster_distance': 0.4,               # Match updated C++ cluster tolerance
+            'min_points_per_cluster': 8,               # Match updated C++ minimum points
+            
+            # Vehicle filtering parameters - optimized for updated LiDAR position
+            'filter_vehicle_points': True,
+            'vehicle_length': 5.2,          
+            'vehicle_width': 2.7,           
+            'vehicle_height': 2.3,          
+            'vehicle_x_offset': 0.0,
+            'vehicle_y_offset': 0.0,
+            'vehicle_z_offset': -1.0,
+            'vehicle_safety_margin': 0.9,              # Increased for better vehicle filtering
+            'vehicle_visualization': True,
+            
+            # Motion compensation - UPDATED for narrow FOV
+            'enable_motion_compensation': True,
+            'use_imu_data': True,
+            'point_time_compensation': True,
+            'motion_prediction_time': 0.18,            # Increased for smoother transitions with narrow FOV
+            
+            # LiDAR specific parameters - EXACTLY matching CARLA configuration
+            'lidar_upper_fov': 0.0,                    # EXACT match with CARLA config
+            'lidar_lower_fov': -15.0,                  # EXACT match with CARLA config
+            'lidar_pitch_angle': 5.0,                  # EXACT match with CARLA config 
+            'min_point_distance': 2.2,                 # Adjusted for cleaner data matching CARLA settings
+            'max_negative_z': -0.7,                    # Adjusted for CARLA height configuration
+            
+            # Clustering parameters - optimized for narrow FOV in large area
+            'frame_id': 'lidar_link',
+            'use_tf_transform': True,
+            'queue_size': 15,                          # Increased for smoother visualization in large map
+            'publish_rate': 50.0,                      # Adjusted for balanced visualization
+            
+            # Object boxing parameters - adjusted for larger map area
+            'enable_object_boxes': True,
+            'box_padding': 0.2,                        # Match updated settings
+            'min_box_points': 8,                       # Match updated C++ min cluster points
+            'use_oriented_boxes': True,
+            'publish_box_markers': True,
+            'box_lifetime': 0.3,                       # Increased for better visibility in large map
+            'box_color_r': 0.0,
+            'box_color_g': 1.0,
+            'box_color_b': 0.0,
+            'box_color_a': 0.8,                        # Increased for better visibility in large map
+            
+            # Additional C++ data specific parameters - optimized for large map
+            'cpp_data_format': 'packed_float',
+            'cpp_data_endianness': 'little',
+            'cpp_format_version': 2,
+            'cpp_source_path': '/home/mostafa/ROS2andCarla/CPP/Lidar_Processing',
+            'enable_cpp_data_logging': False,
+            'log_dropped_packets': True,
+            'enable_data_rate_limiting': False,
+            
+            # Movement filtering - adjusted for narrow FOV in large area
+            'movement_detection': True,
+            'movement_speed_threshold': 0.12,          # Adjusted for stability with narrow FOV
+            'stationary_cluster_threshold': 8,         # Match updated C++ min cluster points
+            'moving_cluster_threshold': 8,             # Match updated C++ min cluster points
+            'adaptive_clustering': True,
+        }],
+        output='screen'
+    )
+    
+    # IMU-LiDAR Fusion Node - optimized for C++ data streams
+    imu_lidar_fusion_node = Node(
+        package='sensor_fusion',
+        executable='imu_lidar_yaw_fusion',
+        name='imu_lidar_yaw_fusion',
+        parameters=[{
+            # Connection parameters
+            'imu_topic': '/imu/data',
+            'map_topic': '/realtime_map',
+            
+            # Processing parameters - optimized for C++ data
+            'publish_rate': 200.0,
+            
+            # IMU-specific parameters - optimized for C++ data
+            'initial_yaw_offset': LaunchConfiguration('imu_yaw_offset'),
+            'use_filtered_yaw': True,
+            'yaw_filter_size': 2,
+            'yaw_weight': 0.97,
+            'fusion_mode': 'weighted_avg',
+            'adaptive_fusion': True,
+            'stationary_fusion_weight': 0.9,           # Weight when stationary
+            'moving_fusion_weight': 0.98,              # Weight when moving
+            
+            # Motion detection
+            'motion_detection_enabled': True,
+            'motion_threshold': 0.05,                  # Lower threshold for better motion detection
+            'yaw_rate_threshold': 0.03,                # Lower threshold for better rotation detection
+            
+            # Transform parameters
+            'publish_tf': True,
+            'map_frame_id': 'map',
+            'base_frame_id': 'base_link',
+            'override_static_tf': True,
+            'publish_tf_rate': 200.0,
+            
+            # Map configuration
+            'all_white_map': True,
+            'invert_map_colors': False,
+            
+            # TF parameters
+            'tf_buffer_duration': LaunchConfiguration('tf_buffer_duration'),
+            'tf_timeout': LaunchConfiguration('tf_timeout'),
+            'wait_for_transform': True,
+            'transform_tolerance': LaunchConfiguration('transform_tolerance'),
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            
+            # Map saving parameters
+            'enable_auto_save': LaunchConfiguration('enable_auto_save'),
+            'auto_save_interval': LaunchConfiguration('auto_save_interval'),
+            'map_save_dir': LaunchConfiguration('map_save_dir'),
+        }],
+        output='screen'
+    )
+    
+    # Real-time mapper node - optimized for grid-based visualization with larger map
     fast_imu_lidar_mapper_node = Node(
         package='sensor_fusion',
         executable='lidar_realtime_mapper',
         name='lidar_fast_fusion_mapper',
         parameters=[{
-            # Map resolution and size parameters - optimized for performance/accuracy balance
-            'map_resolution': LaunchConfiguration('map_resolution'),
-            'map_width_meters': LaunchConfiguration('map_width_meters'),
-            'map_height_meters': LaunchConfiguration('map_height_meters'),
-            'center_on_vehicle': LaunchConfiguration('center_on_vehicle'),
+            # Map resolution and size parameters - ENLARGED for bigger visualization area
+            'map_resolution': 0.4,          # Increased for larger area coverage with reasonable detail
+            'map_width_meters': 100.0,      # DOUBLED map width for much larger coverage area
+            'map_height_meters': 100.0,     # DOUBLED map height for much larger coverage area
+            'center_on_vehicle': True,
             
-            # Processing parameters - higher rates for real-time response
-            'publish_rate': LaunchConfiguration('publish_rate'),  # Configurable publish rate
-            'process_rate': LaunchConfiguration('process_rate'),  # Configurable process rate 
+            # Processing rates - optimized for larger map
+            'publish_rate': 30.0,           # Reduced for better performance with larger map
+            'process_rate': 80.0,           # Adjusted for efficient processing of larger area
             
-            # Bayesian update weights - enhanced for better obstacle detection
-            'hit_weight': LaunchConfiguration('hit_weight'),      # Configurable hit weight
-            'miss_weight': LaunchConfiguration('miss_weight'),    # Configurable miss weight
-            'prior_weight': LaunchConfiguration('prior_weight'),  # Now configurable
-            'count_threshold': LaunchConfiguration('count_threshold'), # Now configurable
+            # Bayesian update weights - optimized for larger grid space
+            'hit_weight': 0.82,             # Slightly reduced for less aggressive occupation in large map
+            'miss_weight': 0.90,            # Adjusted for smoother clearing in large spaces
+            'prior_weight': 0.0,
+            'count_threshold': 0.12,        # Increased for more definitive grid cells in large map
             
-            # Fast mapping parameters for optimized data processing
-            'decay_rate': LaunchConfiguration('decay_rate'),      # Configurable decay rate
-            'update_threshold': LaunchConfiguration('update_threshold'), # Now configurable
-            'temporal_memory': LaunchConfiguration('temporal_memory'),  # Configurable temporal memory
-            'enable_map_reset': LaunchConfiguration('enable_map_reset'),  # Enable periodic map reset
-            'map_reset_interval': LaunchConfiguration('map_reset_interval'),  # Reset interval
-            'use_binary_map': LaunchConfiguration('use_binary_map'),  # Force binary map output
-            'obstacle_threshold': LaunchConfiguration('obstacle_threshold'),  # Threshold for obstacles
+            # Fast mapping parameters - optimized for larger grid space
+            'decay_rate': 0.75,             # Reduced for longer persistence in large grid
+            'update_threshold': 0.00015,    # Adjusted for stable grid updates in large area
+            'temporal_memory': 0.08,        # Increased for better object persistence in large map
+            'enable_map_reset': True,
+            'map_reset_interval': 5.0,      # Increased for larger map area
+            'obstacle_threshold': 0.48,     # Increased for clearer obstacle definition in large map
+            'initialize_as_free': True,
+            'unknown_to_free': True,
             
-            # Map saving parameters - configurable options
-            'enable_map_save': LaunchConfiguration('enable_map_save'),  # Enable saving map 
-            'map_save_dir': LaunchConfiguration('map_save_dir'),  # Directory to save maps
-            'enable_auto_save': LaunchConfiguration('enable_auto_save'),  # Enable auto save
-            'auto_save_interval': LaunchConfiguration('auto_save_interval'),  # Auto save interval
-            'map_base_filename': LaunchConfiguration('map_base_filename'),  # Base filename for saved maps
-            'save_format': LaunchConfiguration('save_format'),  # Format to save maps in
+            # C++ Integration optimizations - with updated parameters to match C++ code
+            'enable_multi_threading': True,
+            'thread_count': 6,              # Increased for better parallel processing of larger map
+            'use_lockless_updates': True,
+            'enable_simd_optimization': True,
+            'enable_point_batching': True,
+            'batch_size': 1500,             # Increased for more efficient batch processing
+            'enable_adaptive_processing': True,
+            'cpp_data_preprocessing': True,
+            'cpp_data_source_path': '/home/mostafa/ROS2andCarla/CPP/Lidar_Processing',
             
-            # Other parameters - now more configurable
-            'ground_threshold': LaunchConfiguration('ground_threshold'),  # Now configurable
-            'min_height': LaunchConfiguration('min_height'),  # Now configurable
-            'max_height': LaunchConfiguration('max_height'),  # Now configurable
-            'raycast_skip': LaunchConfiguration('raycast_skip'),  # Now configurable
-            'max_points_to_process': LaunchConfiguration('max_points_to_process'),  # Configurable max points
-            'use_cluster_data': LaunchConfiguration('use_cluster_data'),  # Now configurable
+            # Point filtering parameters - MATCHED WITH UPDATED C++ CODE
+            'outlier_std_dev_multiplier': 4.2,         # Match updated C++ SOR parameter
+            'outlier_neighbor_radius': 0.7,            # Match updated C++ neighbor radius
+            'outlier_min_neighbors': 12,               # Match updated C++ min neighbors
+            'voxel_filter_size': 0.15,                 # Match updated C++ voxel grid parameter
+            
+            # Ground plane parameters - MATCHED WITH UPDATED C++ CODE
+            'ransac_iterations': 200,                  # Match updated C++ RANSAC iterations
+            'ransac_distance_threshold': 0.22,         # Match updated C++ RANSAC distance threshold
+            
+            # Motion compensation parameters - adjusted for larger grid
+            'enable_motion_compensation': True,
+            'motion_compensation_max_speed': 8.0,      # Increased for faster vehicle movement in large map
+            'motion_compensation_max_yaw_rate': 1.2,   # Increased for more responsive turning compensation
+            'use_velocity_history': True,
+            
+            # Map saving parameters
+            'enable_map_save': LaunchConfiguration('enable_map_save'),
+            'map_save_dir': LaunchConfiguration('map_save_dir'),
+            'enable_auto_save': LaunchConfiguration('enable_auto_save'),
+            'auto_save_interval': LaunchConfiguration('auto_save_interval'),
+            'map_base_filename': LaunchConfiguration('map_base_filename'),
+            'save_format': LaunchConfiguration('save_format'),
+            
+            # Point processing parameters - adjusted for updated FOV
+            'ground_threshold': 0.22,       # Match updated C++ RANSAC distance threshold
+            'min_height': -0.7,             # Adjusted for updated LiDAR configuration
+            'max_height': 3.0,              # Increased for taller objects in larger map
+            'raycast_skip': 4,              # Increased for faster processing of larger map
+            'max_points_to_process': 7000,  # Adjusted for larger area coverage
+            'use_cluster_data': True,
+            
+            # Vehicle motion filtering - adjusted for larger grid
+            'motion_filter_enabled': True,
+            'motion_detection_threshold': 0.15,        # Increased for less sensitivity in large map
+            'motion_clearing_factor': 1.6,             # Adjusted for better clearing behavior
+            'stationary_decay_factor': 0.35,           # Adjusted for stable grid
+            'clear_obstacles_behind': True,
+            'behind_vehicle_distance': 4.0,            # Increased for larger area
+            'use_velocity_direction': True,
+            
+            # Frame IDs
             'vehicle_frame_id': 'base_link',
             'map_frame_id': 'map',
             
-            # TF parameters optimized for faster lookups
-            'tf_buffer_duration': LaunchConfiguration('tf_buffer_duration'),  # Now configurable
-            'tf_timeout': LaunchConfiguration('tf_timeout'),  # Now configurable
-            'use_sim_time': LaunchConfiguration('use_sim_time'),  # Now configurable for testing
-            'wait_for_transform': True,    # Wait for transform to be available
-            'transform_tolerance': LaunchConfiguration('transform_tolerance'),  # Now configurable
+            # TF parameters
+            'tf_buffer_duration': LaunchConfiguration('tf_buffer_duration'),
+            'tf_timeout': LaunchConfiguration('tf_timeout'),
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'wait_for_transform': True,
+            'transform_tolerance': LaunchConfiguration('transform_tolerance'),
             
-            # Vehicle point filtering parameters - tailored for CARLA LiDAR mounted at x=1.5, z=2.0
-            'filter_vehicle_points': True,           # Enable filtering of vehicle points
-            'vehicle_filter_radius': 2.0,            # Larger radius for better vehicle filtering
-            'vehicle_filter_height_min': -1.0,       # Lower minimum to catch entire car
-            'vehicle_filter_height_max': 1.5,        # Higher maximum for high-mounted LiDAR 
-            'min_range_filter': 1.0,                 # Larger minimum range
-            'vehicle_filter_x_offset': -1.5,         # Account for forward position of LiDAR
+            # Vehicle point filtering parameters - adjusted for updated LiDAR position
+            'filter_vehicle_points': True,
+            'vehicle_filter_radius': 3.5,              # Increased for better vehicle filtering
+            'vehicle_filter_height_min': -1.3,         # Adjusted for updated LiDAR height
+            'vehicle_filter_height_max': 3.2,          # Increased for taller vehicle models
+            'min_range_filter': 2.2,                   # Increased for cleaner near-vehicle data
+            'vehicle_filter_x_offset': 0.0,
+            'dynamic_filter_expansion': 0.6,           # Increased for better dynamic filtering
             
-            # A* specific parameters
-            'use_binary_map': True,                 # Force binary map for clear A* implementation
-            'obstacle_inflation': 0.4,              # Inflate obstacles for safer path planning
-            'enable_grid_lines': True,              # Optional: Draw grid lines for easier debugging
-            'grid_cell_size': 4,                    # Draw grid every 4 cells
-            'grid_line_thickness': 1,               # Thin grid lines
-            'grid_line_color': [50, 50, 50, 128],   # Semi-transparent dark gray
+            # Binary map configuration - essential for grid visualization
+            'use_binary_map': True,
             
-                          # New parameter: minimum range to filter very close points
+            # A* specific parameters - optimized for larger grid-based planning
+            'obstacle_inflation': 0.7,                 # Increased for safer path planning in large map
+            
+            # Grid visualization parameters - ENHANCED for larger map
+            'enable_grid_lines': True,                 # Enabled for better large map visualization
+            'grid_cell_size': 5,                       # Increased for larger map
+            'grid_line_thickness': 1,
+            'grid_line_color': LaunchConfiguration('grid_line_color'),
+            
+            # Object boxing parameters - adjusted for larger map
+            'enable_object_boxing': True,      
+            'min_box_size': 0.5,                       # Match updated C++ settings
+            'max_box_size': 20.0,                      # Increased for larger objects in big map
+            'box_padding': 0.2,                        # Match updated C++ settings
+            'min_points_for_box': 8,                   # Match updated C++ min cluster points
+            'use_oriented_boxes': True,        
+            'box_retention_time': 0.3,                 # Increased for better visibility in large map
+            'publish_box_markers': True,       
+            'object_tracking': True,           
+            'object_velocity_estimation': True,
+            'minimum_track_confidence': 0.6,
+            
+            # Clustering parameters - MATCHED WITH UPDATED C++ CODE
+            'cluster_tolerance': 0.4,                  # Match updated C++ cluster tolerance
+            'min_cluster_size': 8,                     # Match updated C++ minimum points
+            'max_cluster_size': 8000,                  # Increased for larger objects in big map
+            
+            # ROS 2 DDS tuning for grid visualization
+            'use_transient_local_durability': True,
+            'use_reliable_reliability': True,
+            'history_depth': 5,
+            'use_best_effort_subscription': False,
         }],
         output='screen'
     )
     
-    # Delay the start of the mapper - further reduced delay for faster startup
+    # Delay the start of the mapper for transform tree to be established
     delayed_mapper = TimerAction(
-        period=LaunchConfiguration('mapper_delay'),  # Now configurable
+        period=LaunchConfiguration('mapper_delay'),
         actions=[fast_imu_lidar_mapper_node]
     )
     
+    # Create the launch description with all nodes and argument declarations
     return LaunchDescription([
+        # ================= LAUNCH ARGUMENTS =================
         # TCP connection parameters for IMU and LiDAR
         DeclareLaunchArgument(
             'imu_tcp_ip',
@@ -152,20 +438,103 @@ def generate_launch_description():
             description='Port number of the LiDAR TCP server'
         ),
         
-        # Map Parameters - optimized for A* path planning
+        # IMU parameters
+        DeclareLaunchArgument(
+            'imu_yaw_offset',
+            default_value='0.0',
+            description='Initial yaw offset for IMU (radians)'
+        ),
+
+        # LiDAR mounting parameters
+        DeclareLaunchArgument(
+            'lidar_x_offset',
+            default_value='0.0',
+            description='X offset of LiDAR from IMU (meters)'
+        ),
+        DeclareLaunchArgument(
+            'lidar_y_offset',
+            default_value='0.0',
+            description='Y offset of LiDAR from IMU (meters)'
+        ),
+        DeclareLaunchArgument(
+            'lidar_z_offset',
+            default_value='0.2',
+            description='Z offset of LiDAR from IMU (meters)'
+        ),
+        DeclareLaunchArgument(
+            'lidar_roll',
+            default_value='0.0',
+            description='Roll angle of LiDAR mounting (radians)'
+        ),
+        DeclareLaunchArgument(
+            'lidar_pitch',
+            default_value='0.0',
+            description='Pitch angle of LiDAR mounting (radians)'
+        ),
+        DeclareLaunchArgument(
+            'lidar_yaw',
+            default_value='0.0',
+            description='Yaw angle of LiDAR mounting (radians)'
+        ),
+        
+        # LiDAR field of view parameters - updated to match CARLA config
+        DeclareLaunchArgument(
+            'lidar_upper_fov',
+            default_value='0.0',           # Updated to match CARLA config
+            description='Upper vertical field of view of LiDAR (degrees)'
+        ),
+        DeclareLaunchArgument(
+            'lidar_lower_fov',
+            default_value='-15.0',         # Updated to match CARLA config
+            description='Lower vertical field of view of LiDAR (degrees)'
+        ),
+        
+        # Vehicle dimensions
+        DeclareLaunchArgument(
+            'vehicle_length',
+            default_value='5.0',
+            description='Length of vehicle (meters)'
+        ),
+        DeclareLaunchArgument(
+            'vehicle_width',
+            default_value='2.5',
+            description='Width of vehicle (meters)'
+        ),
+        DeclareLaunchArgument(
+            'vehicle_height',
+            default_value='2.2',
+            description='Height of vehicle (meters)'
+        ),
+        DeclareLaunchArgument(
+            'vehicle_x_offset',
+            default_value='0.0',
+            description='X offset of vehicle center from base_link (meters)'
+        ),
+        DeclareLaunchArgument(
+            'vehicle_y_offset',
+            default_value='0.0',
+            description='Y offset of vehicle center from base_link (meters)'
+        ),
+        DeclareLaunchArgument(
+            'vehicle_z_offset',
+            default_value='-1.0',
+            description='Z offset of vehicle center from base_link (meters)'
+        ),
+        
+        # Map Parameters - updated for larger visualization
         DeclareLaunchArgument(
             'map_resolution',
-            default_value='0.20',  # Less detailed but more efficient for path planning
+            default_value='0.4',            # Updated for larger map
             description='Resolution of the fast map (meters per cell)'
         ),
         DeclareLaunchArgument(
             'map_width_meters',
-            default_value='50.0',  # Wider map for longer path planning
+            default_value='100.0',          # DOUBLED for much larger map
             description='Width of the map in meters'
         ),
         DeclareLaunchArgument(
             'map_height_meters',
-            default_value='50.0',  # Taller map for longer path planning
+            default_value='100.0',          # DOUBLED for much larger map
             description='Height of the map in meters'
         ),
         DeclareLaunchArgument(
@@ -174,316 +543,124 @@ def generate_launch_description():
             description='Keep map centered on vehicle position'
         ),
         
-        # Performance parameters - optimized for real-time response
+        # Performance parameters
         DeclareLaunchArgument(
             'publish_rate',
-            default_value='30.0',  # Increased publish rate for smoother visualization
+            default_value='60.0',
             description='Rate to publish map (Hz)'
         ),
         DeclareLaunchArgument(
             'process_rate',
-            default_value='60.0',  # Increased process rate for faster updates
+            default_value='150.0',
             description='Rate to process map data (Hz)'
         ),
         DeclareLaunchArgument(
             'mapper_delay',
-            default_value='0.5',  # Reduced delay for faster startup
+            default_value='0.3',
             description='Delay before starting mapper (seconds)'
-        ),
-        
-        # Bayesian update parameters - optimized for better obstacle detection
-        DeclareLaunchArgument(
-            'hit_weight',
-            default_value='1.0',  # Maximum confidence in hits
-            description='Weight for obstacle hits in Bayesian update'
-        ),
-        DeclareLaunchArgument(
-            'miss_weight',
-            default_value='0.5',  # Stronger clearing for faster free space updates
-            description='Weight for misses (free space) in Bayesian update'
-        ),
-        DeclareLaunchArgument(
-            'prior_weight',
-            default_value='0.5',  # Start with unknown/gray
-            description='Prior weight for initial map state'
-        ),
-        DeclareLaunchArgument(
-            'count_threshold',
-            default_value='0.12',  # Lower threshold for faster binary mapping
-            description='Count threshold for binary mapping'
-        ),
-        
-        # Fast mapping specific parameters - optimized for A* path planning
-        DeclareLaunchArgument(
-            'decay_rate',
-            default_value='0.95',  # Slightly slower decay for more persistent obstacles
-            description='Rate at which old map data decays (0-1, higher = faster decay)'
-        ),
-        DeclareLaunchArgument(
-            'update_threshold',
-            default_value='0.0003',  # Lower threshold for faster updates
-            description='Threshold for map updates'
-        ),
-        DeclareLaunchArgument(
-            'temporal_memory',
-            default_value='0.15',  # Shorter memory for faster updates
-            description='Duration to remember points (seconds)'
-        ),
-        DeclareLaunchArgument(
-            'enable_map_reset',
-            default_value='true',  # Enable map reset
-            description='Enable periodic map reset to clear old data'
-        ),
-        DeclareLaunchArgument(
-            'map_reset_interval',
-            default_value='8.0',  # Reset map more frequently
-            description='Interval for map reset (seconds)'
-        ),
-        DeclareLaunchArgument(
-            'use_binary_map',
-            default_value='true',  # Binary is essential for A* - clear obstacle/free distinction
-            description='Use binary (black/white) map output for clear path planning'
-        ),
-        DeclareLaunchArgument(
-            'obstacle_threshold',
-            default_value='0.55',  # Lower threshold to be more cautious with obstacles
-            description='Threshold for marking cells as obstacles (0-1)'
-        ),
-        DeclareLaunchArgument(
-            'obstacle_inflation',
-            default_value='0.4',  # New parameter: inflate obstacles for safer paths
-            description='Amount to inflate obstacles for safer path planning (meters)'
-        ),
-        DeclareLaunchArgument(
-            'max_points_to_process',
-            default_value='8000',  # Process more points for better detail
-            description='Maximum number of points to process per update'
         ),
         
         # Map saving parameters
         DeclareLaunchArgument(
             'enable_map_save',
-            default_value='true',  # Enable map saving
+            default_value='true',
             description='Enable saving map to disk'
         ),
         DeclareLaunchArgument(
             'map_save_dir',
-            default_value='/home/mostafa/Robot_local/maps',  # Updated path to match workspace
+            default_value='/home/mostafa/Robot_local/maps',
             description='Directory to save maps'
         ),
         DeclareLaunchArgument(
             'enable_auto_save',
-            default_value='true',  # Enable auto save
+            default_value='true',
             description='Enable automatic saving of map at intervals'
         ),
         DeclareLaunchArgument(
             'auto_save_interval',
-            default_value='5.0',  # Save interval
+            default_value='10.0',
             description='Interval for auto-saving the map (seconds)'
         ),
         DeclareLaunchArgument(
             'map_base_filename',
-            default_value='fast_fusion_map',  # Base filename for saved maps
+            default_value='fast_fusion_map',
             description='Base filename for saved maps'
         ),
         DeclareLaunchArgument(
             'save_format',
-            default_value='png',  # Format to save maps in
+            default_value='png',
             description='Format to save maps in (png, pgm, or both)'
         ),
         
-        # Additional configurable parameters
+        # Grid visualization parameters
         DeclareLaunchArgument(
-            'ground_threshold',
-            default_value='0.12',  # Lower threshold for better ground detection
-            description='Threshold for ground detection'
+            'enable_grid_lines',
+            default_value='false',
+            description='Whether to display grid lines on the map'
         ),
         DeclareLaunchArgument(
-            'min_height',
-            default_value='-0.5',  # Lower minimum height for better ground mapping
-            description='Minimum height for point cloud processing'
+            'grid_cell_size',
+            default_value='4',
+            description='Number of cells between grid lines'
         ),
         DeclareLaunchArgument(
-            'max_height',
-            default_value='2.5',  # Higher maximum height for taller obstacles
-            description='Maximum height for point cloud processing'
+            'grid_line_thickness',
+            default_value='1',
+            description='Thickness of grid lines in pixels'
         ),
         DeclareLaunchArgument(
-            'raycast_skip',
-            default_value='1',  # Process more points for better detail
-            description='Number of points to skip during raycasting'
-        ),
-        DeclareLaunchArgument(
-            'use_cluster_data',
-            default_value='true',  # Use cluster data
-            description='Whether to use cluster data for mapping'
+            'grid_line_color',
+            default_value='128 128 128 128',
+            description='Color of grid lines in RGBA format (0-255 each)'
         ),
         
         # TF parameters
         DeclareLaunchArgument(
             'tf_buffer_duration',
-            default_value='3.0',  # Shorter buffer for less memory usage
+            default_value='3.0',
             description='Duration of TF buffer (seconds)'
         ),
         DeclareLaunchArgument(
             'tf_timeout',
-            default_value='0.3',  # Shorter timeout for faster failures and retries
+            default_value='0.3',
             description='Timeout for TF lookups (seconds)'
         ),
         DeclareLaunchArgument(
             'transform_tolerance',
-            default_value='0.2',  # Lower tolerance for faster lookups
+            default_value='0.2',
             description='Tolerance for transform lookups (seconds)'
         ),
         DeclareLaunchArgument(
             'use_sim_time',
-            default_value='false',  # Use real time by default
+            default_value='false',
             description='Whether to use simulation time'
         ),
 
         # Visualization parameters
         DeclareLaunchArgument(
             'point_size',
-            default_value='1.0',  # Point size for visualization
+            default_value='1.0',
             description='Size of individual point markers'
         ),
         DeclareLaunchArgument(
             'center_size',
-            default_value='2.0',  # Center size for visualization
+            default_value='2.0',
             description='Size of cluster center markers'
         ),
         DeclareLaunchArgument(
             'use_convex_hull',
-            default_value='false',  # Disable convex hull for better performance
+            default_value='true',
             description='Whether to display 2D convex hull around clusters'
         ),
         
-        # Add vehicle filtering parameters with updated values - tailored for CARLA setup
-        DeclareLaunchArgument(
-            'filter_vehicle_points',
-            default_value='true',  # Enable vehicle point filtering
-            description='Whether to filter out points belonging to the vehicle itself'
-        ),
-        DeclareLaunchArgument(
-            'vehicle_filter_radius',
-            default_value='2.0',  # Larger radius to cover entire car from forward-mounted LiDAR
-            description='Radius around vehicle center to filter out points'
-        ),
-        DeclareLaunchArgument(
-            'vehicle_filter_height_min',
-            default_value='-1.0',  # Lower to ensure catching the entire car height from top-mounted LiDAR
-            description='Minimum height for vehicle point filtering'
-        ),
-        DeclareLaunchArgument(
-            'vehicle_filter_height_max',
-            default_value='1.5',  # Higher to account for high-mounted LiDAR (2.0m)
-            description='Maximum height for vehicle point filtering'
-        ),
-        DeclareLaunchArgument(
-            'min_range_filter',
-            default_value='1.0',  # Increased minimum range to account for forward mounting
-            description='Minimum distance to keep points (creates blind spot)'
-        ),
-        DeclareLaunchArgument(
-            'vehicle_filter_x_offset',
-            default_value='-1.5',  # Negative of the x-position to center filter on vehicle not LiDAR
-            description='X offset for vehicle filtering (negative of LiDAR x position)'
-        ),
-        
-        # TF static transform publishers - restored map_to_base_link for initial connectivity
+        # =============== NODE INSTANTIATION ===============
+        # Launch TF tree first to ensure transform availability
         world_to_map_node,
-        map_to_base_link_node,  # Add this back to ensure connectivity
+        map_to_base_link_node,
         base_to_imu_node,
         imu_to_lidar_node,
         
-        # Set up the IMU Euler Visualizer node (to display IMU data)
-        Node(
-            package='sensor_fusion',
-            executable='imu_euler_visualizer',
-            name='imu_euler_visualizer',
-            parameters=[{
-                'tcp_ip': LaunchConfiguration('imu_tcp_ip'),
-                'tcp_port': LaunchConfiguration('imu_tcp_port'),
-                'reconnect_interval': 2.0,  # Faster reconnects
-                'frame_id': 'imu_link',
-                'world_frame_id': 'world',
-                'filter_window_size': 2,    # Smaller filter window for faster response
-                'queue_size': 10,           # New parameter for queue size
-                'publish_rate': 100.0,      # New parameter for publish rate
-            }],
-            output='screen'
-        ),
-        
-        # Set up the LiDAR listener node with optimized parameters
-        Node(
-            package='sensor_fusion',
-            executable='lidar_listener_clusters_2',
-            name='lidar_cube_visualizer',
-            parameters=[{
-                'tcp_ip': LaunchConfiguration('lidar_tcp_ip'),
-                'tcp_port': LaunchConfiguration('lidar_tcp_port'),
-                'point_size': LaunchConfiguration('point_size'),
-                'center_size': LaunchConfiguration('center_size'),
-                'use_convex_hull': LaunchConfiguration('use_convex_hull'),
-                'use_point_markers': False,
-                'use_cluster_stats': True,
-                'verbose_logging': False,
-                'cube_alpha': 0.3,
-                'filter_vehicle_points': True,          # Keep this enabled
-                'vehicle_filter_radius': 2.0,           # Increased for forward-mounted LiDAR
-                'vehicle_filter_height_min': -1.0,      # Lower to catch entire vehicle from high mounting
-                'vehicle_filter_height_max': 1.5,       # Higher for high-mounted LiDAR
-                'min_range_filter': 1.0,                # Slightly larger blind spot for forward mounting
-                'vehicle_filter_x_offset': -1.5,        # Account for forward mounting position
-                'frame_id': 'lidar_link',
-                'use_tf_transform': True,
-                'queue_size': 10,
-                'publish_rate': 40.0,
-                'min_points_per_cluster': 7,
-                'max_cluster_distance': 0.35,
-            }],
-            output='screen'
-        ),
-        
-        # Set up the fast imu-lidar mapper node with a delay to ensure transforms are available
-        delayed_mapper,
-        
-        # Set up the IMU-Lidar yaw fusion node with explicit TF publishing
-        Node(
-            package='sensor_fusion',
-            executable='imu_lidar_yaw_fusion',
-            name='imu_lidar_yaw_fusion',
-            parameters=[{
-                # Connection parameters
-                'imu_topic': '/imu/data',
-                'map_topic': '/realtime_map',  # Use realtime map for fusion
-                
-                # Processing parameters - higher rate for faster updates
-                'publish_rate': 50.0,  # Higher rate specifically for TF publishing
-                
-                # IMU-specific parameters - optimized for map rotation
-                'initial_yaw_offset': 0.0,
-                'use_filtered_yaw': True,
-                'yaw_filter_size': 3,          # Smaller filter for faster response
-                'yaw_weight': 0.95,            # Even higher IMU weight to ensure map rotation (was 0.85)
-                'fusion_mode': 'weighted_avg', # Parameter for fusion mode
-                'adaptive_fusion': True,       # Parameter for adaptive fusion
-                'publish_tf': True,            # Make absolutely sure TF is published
-                'map_frame_id': 'map',         # Map frame ID
-                'base_frame_id': 'base_link',  # Base frame ID
-                'override_static_tf': True,    # New parameter to override static transform
-                
-                # TF parameters - optimized for faster lookups
-                'tf_buffer_duration': LaunchConfiguration('tf_buffer_duration'),
-                'tf_timeout': LaunchConfiguration('tf_timeout'),
-                'wait_for_transform': True,
-                'transform_tolerance': LaunchConfiguration('transform_tolerance'),
-                'use_sim_time': LaunchConfiguration('use_sim_time'),
-            }],
-            output='screen'
-        ),
-        
-        # RViz for visualization - use the realtime map config
+        # Launch RViz for visualization
         Node(
             package='rviz2',
             executable='rviz2',
@@ -491,4 +668,14 @@ def generate_launch_description():
             arguments=['-d', [get_package_share_directory('sensor_fusion'), '/rviz/realtime_map.rviz']],
             output='screen'
         ),
+        
+        # Launch sensor data providers
+        imu_euler_visualizer_node,
+        lidar_listener_node,
+        
+        # Launch the fusion node
+        imu_lidar_fusion_node,
+        
+        # Launch the mapper with a delay
+        delayed_mapper,
     ]) 
