@@ -42,29 +42,37 @@ def euler_from_quaternion(x, y, z, w):
 
 class ImuLidarYawFusion(Node):
     """
-    Fuses IMU yaw data with the permanent lidar map to improve mapping accuracy.
+    Fuses IMU yaw data with the realtime lidar map to improve mapping accuracy.
     
     This node:
     1. Subscribes to IMU data to get yaw information
-    2. Subscribes to the permanent map from lidar_permanent_mapper
+    2. Subscribes to the realtime map from lidar_realtime_mapper
     3. Applies yaw orientation to transform/rotate the map
     4. Publishes the yaw-corrected map
     5. Provides services to save and load the fused map
+    6. Updates the TF tree with the current orientation
     """
     def __init__(self):
         super().__init__('imu_lidar_yaw_fusion')
         
         # Declare parameters
         self.declare_parameter('imu_topic', '/imu/data')
-        self.declare_parameter('map_topic', '/permanent_map')
-        self.declare_parameter('publish_rate', 1.0)  # Hz
+        self.declare_parameter('map_topic', '/realtime_map')  # Changed to use realtime_map instead of permanent_map
+        self.declare_parameter('publish_rate', 30.0)  # Increased rate for more responsiveness
         self.declare_parameter('initial_yaw_offset', 0.0)  # Initial yaw offset in radians
         self.declare_parameter('use_filtered_yaw', True)  # Use filtered yaw
-        self.declare_parameter('yaw_filter_size', 10)  # Size of yaw filter buffer
-        self.declare_parameter('yaw_weight', 0.7)  # Weight of yaw in fusion (0-1)
+        self.declare_parameter('yaw_filter_size', 5)  # Smaller filter size for quicker response
+        self.declare_parameter('yaw_weight', 0.95)  # Higher weight of yaw in fusion (0-1)
         self.declare_parameter('enable_auto_save', True)  # Auto-save map periodically
-        self.declare_parameter('auto_save_interval', 60.0)  # Auto-save interval in seconds
+        self.declare_parameter('auto_save_interval', 30.0)  # Auto-save interval in seconds
         self.declare_parameter('map_save_dir', '/home/mostafa/GP/ROS2/maps')  # Directory to save maps
+        self.declare_parameter('publish_tf', True)  # Whether to publish TF
+        self.declare_parameter('map_frame_id', 'map')  # Map frame ID
+        self.declare_parameter('base_frame_id', 'base_link')  # Base frame ID
+        self.declare_parameter('override_static_tf', True)  # Whether to override static TF
+        self.declare_parameter('publish_tf_rate', 100.0)  # Higher rate for TF publishing
+        self.declare_parameter('all_white_map', True)  # New parameter for all-white map mode
+        self.declare_parameter('invert_map_colors', False)  # New parameter to invert colors if needed
         
         # Get parameters
         self.imu_topic = self.get_parameter('imu_topic').value
@@ -77,6 +85,13 @@ class ImuLidarYawFusion(Node):
         self.enable_auto_save = self.get_parameter('enable_auto_save').value
         self.auto_save_interval = self.get_parameter('auto_save_interval').value
         self.map_save_dir = self.get_parameter('map_save_dir').value
+        self.publish_tf = self.get_parameter('publish_tf').value
+        self.map_frame_id = self.get_parameter('map_frame_id').value
+        self.base_frame_id = self.get_parameter('base_frame_id').value
+        self.override_static_tf = self.get_parameter('override_static_tf').value
+        self.publish_tf_rate = self.get_parameter('publish_tf_rate').value
+        self.all_white_map = self.get_parameter('all_white_map').value
+        self.invert_map_colors = self.get_parameter('invert_map_colors').value
         
         # Ensure map save directory exists
         if not os.path.exists(self.map_save_dir):
@@ -157,12 +172,18 @@ class ImuLidarYawFusion(Node):
         self.last_performance_time = time.time()
         self.create_timer(10.0, self.report_performance)
         
+        # Create TF broadcaster and timer for TF publishing
+        self.tf_broadcaster = TransformBroadcaster(self)
+        if self.publish_tf:
+            self.create_timer(1.0 / self.publish_tf_rate, self.publish_tf_transform)
+        
         self.get_logger().info('IMU Lidar Yaw Fusion node initialized')
         self.get_logger().info(f'IMU topic: {self.imu_topic}')
         self.get_logger().info(f'Map topic: {self.map_topic}')
         self.get_logger().info(f'Publishing rate: {self.publish_rate} Hz')
         self.get_logger().info(f'Using filtered yaw: {self.use_filtered_yaw}')
         self.get_logger().info(f'Initial yaw offset: {math.degrees(self.initial_yaw_offset):.2f} degrees')
+        self.get_logger().info(f'All-white map mode: {self.all_white_map}')
     
     def imu_callback(self, msg):
         """Process incoming IMU data to extract yaw information"""
@@ -194,7 +215,7 @@ class ImuLidarYawFusion(Node):
                 self.filtered_yaw = math.atan2(sin_sum, cos_sum)
     
     def map_callback(self, msg):
-        """Process incoming permanent map data"""
+        """Process incoming realtime map data"""
         with self.map_lock:
             # Store the map and its metadata
             self.current_map = msg
@@ -228,14 +249,19 @@ class ImuLidarYawFusion(Node):
             fused_map.header.frame_id = "map"
             fused_map.info = self.current_map.info
             
-            # Apply yaw orientation to the map origin
-            # This effectively rotates the map based on IMU yaw
-            # For a real implementation, you'd want to apply the rotation to the map data itself
-            
             # Convert map data to 2D array for processing
             width = self.current_map.info.width
             height = self.current_map.info.height
             map_data = np.array(self.current_map.data, dtype=np.int8).reshape(height, width)
+            
+            # Process the map data for all-white map mode
+            if self.all_white_map:
+                # Convert unknown (-1 or 50) to free space (0)
+                map_data[map_data == -1] = 0
+                map_data[map_data == 50] = 0
+                
+                # In binary mode, make sure values are either 0 (free) or 100 (obstacle)
+                map_data[map_data > 0] = 100
             
             # Apply the rotation to the map data
             # Get the map center for rotation
@@ -249,14 +275,16 @@ class ImuLidarYawFusion(Node):
             rotated_map = cv2.warpAffine(map_data, rot_mat, (width, height), 
                                          flags=cv2.INTER_NEAREST, 
                                          borderMode=cv2.BORDER_CONSTANT, 
-                                         borderValue=-1)  # -1 for unknown space
+                                         borderValue=0 if self.all_white_map else -1)  # 0 for free space in all-white mode
+            
+            # Invert colors if specified (for debugging or visualization)
+            if self.invert_map_colors:
+                rotated_map[rotated_map == 0] = 200  # Temporarily store free as 200
+                rotated_map[rotated_map == 100] = 0  # Obstacles become free
+                rotated_map[rotated_map == 200] = 100  # Free becomes obstacle
             
             # Flatten and update the map data
             fused_map.data = rotated_map.flatten().tolist()
-            
-            # Update the map's origin orientation with the IMU yaw
-            # This is a simplified approach - a more sophisticated method would be needed 
-            # to properly update the map frame based on the IMU orientation
             
             # Publish the fused map
             self.fused_map_publisher.publish(fused_map)
@@ -295,13 +323,22 @@ class ImuLidarYawFusion(Node):
                 map_data = np.array(self.current_map.data, dtype=np.int8).reshape(height, width)
                 
                 # Convert occupancy values to grayscale (0-255)
-                # -1 (unknown) -> 205 (gray)
-                # 0 (free) -> 254 (white)
-                # 100 (occupied) -> 0 (black)
                 pgm_data = np.zeros_like(map_data, dtype=np.uint8)
-                pgm_data[map_data == -1] = 205  # Unknown -> gray
-                pgm_data[map_data == 0] = 254   # Free -> white
-                pgm_data[map_data == 100] = 0   # Occupied -> black
+                
+                if self.all_white_map:
+                    # For all-white map, simply convert:
+                    # 0 (free) -> 254 (white)
+                    # 100 (occupied) -> 0 (black)
+                    pgm_data[map_data == 0] = 254   # Free -> white
+                    pgm_data[map_data == 100] = 0   # Occupied -> black
+                else:
+                    # Standard conversion:
+                    # -1 (unknown) -> 205 (gray)
+                    # 0 (free) -> 254 (white)
+                    # 100 (occupied) -> 0 (black)
+                    pgm_data[map_data == -1] = 205  # Unknown -> gray
+                    pgm_data[map_data == 0] = 254   # Free -> white
+                    pgm_data[map_data == 100] = 0   # Occupied -> black
                 
                 # Write PGM file
                 cv2.imwrite(filename, pgm_data)
@@ -320,6 +357,7 @@ class ImuLidarYawFusion(Node):
                     yaml_file.write(f"occupied_thresh: 0.65\n")
                     yaml_file.write(f"free_thresh: 0.196\n")
                     yaml_file.write(f"yaw_fusion: {math.degrees(self.filtered_yaw):.6f}\n")
+                    yaml_file.write(f"all_white_map: {self.all_white_map}\n")
                 
                 self.get_logger().info(f"Saved fused map to {filename} and {yaml_filename}")
                 self.last_save_time = time.time()
@@ -353,6 +391,39 @@ class ImuLidarYawFusion(Node):
         self.frame_count = 0
         self.last_performance_time = current_time
 
+    def publish_tf_transform(self):
+        """Publish the transform from map to base_link based on IMU orientation"""
+        if not self.publish_tf:
+            return
+        
+        with self.yaw_lock:
+            # Get the yaw to use (filtered or raw)
+            tf_yaw = self.filtered_yaw if self.use_filtered_yaw else self.current_yaw
+            
+            # Create transform message
+            t = TransformStamped()
+            t.header.stamp = self.get_clock().now().to_msg()
+            t.header.frame_id = self.map_frame_id
+            t.child_frame_id = self.base_frame_id
+            
+            # Set position (could be updated based on odometry)
+            t.transform.translation.x = 0.0
+            t.transform.translation.y = 0.0
+            t.transform.translation.z = 0.0
+            
+            # Set rotation using quaternion from yaw (only Z rotation for 2D navigation)
+            t.transform.rotation.x = 0.0
+            t.transform.rotation.y = 0.0
+            t.transform.rotation.z = math.sin(tf_yaw / 2.0)
+            t.transform.rotation.w = math.cos(tf_yaw / 2.0)
+            
+            # Publish the transform
+            try:
+                self.tf_broadcaster.sendTransform(t)
+            except Exception as e:
+                self.get_logger().error(f"Error publishing transform: {e}")
+
+
 def main(args=None):
     rclpy.init(args=args)
     
@@ -362,9 +433,12 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        node.get_logger().error(f"Unexpected error: {e}")
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main() 
