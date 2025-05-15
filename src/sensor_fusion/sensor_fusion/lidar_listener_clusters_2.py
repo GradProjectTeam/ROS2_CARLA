@@ -47,13 +47,22 @@ class LidarClient_clusters_2(Node):
         self.cube_alpha = self.get_parameter('cube_alpha').value
         
         # Add parameters for filtering points that hit the car itself
-        self.declare_parameter('filter_vehicle_points', True)  # Whether to filter out points hitting the car
-        self.declare_parameter('vehicle_length', 4.5)          # Length of vehicle in meters (x direction)
-        self.declare_parameter('vehicle_width', 2.0)           # Width of vehicle in meters (y direction)
-        self.declare_parameter('vehicle_height', 1.8)          # Height of vehicle in meters (z direction)
-        self.declare_parameter('vehicle_x_offset', 0.0)        # Offset of vehicle center in x direction
-        self.declare_parameter('vehicle_y_offset', 0.0)        # Offset of vehicle center in y direction
-        self.declare_parameter('vehicle_safety_margin', 0.2)   # Extra margin around vehicle to filter
+        self.declare_parameter('filter_vehicle_points', True)   # Whether to filter out points hitting the car
+        self.declare_parameter('vehicle_length', 5.0)           # Length of vehicle in meters (x direction)
+        self.declare_parameter('vehicle_width', 2.5)            # Width of vehicle in meters (y direction)
+        self.declare_parameter('vehicle_height', 2.2)           # Height of vehicle in meters (z direction)
+        self.declare_parameter('vehicle_x_offset', 0.0)         # Offset of vehicle center in x direction
+        self.declare_parameter('vehicle_y_offset', 0.0)         # Offset of vehicle center in y direction
+        self.declare_parameter('vehicle_z_offset', -1.0)        # Offset of vehicle z-coordinate
+        self.declare_parameter('vehicle_safety_margin', 0.5)    # Extra margin around vehicle to filter
+        self.declare_parameter('vehicle_visualization', True)   # Whether to visualize the vehicle filter zone
+
+        # LiDAR specific configuration parameters
+        self.declare_parameter('lidar_upper_fov', 15.0)         # Upper field of view in degrees
+        self.declare_parameter('lidar_lower_fov', -25.0)        # Lower field of view in degrees
+        self.declare_parameter('lidar_pitch_angle', 5.0)        # Upward pitch of LiDAR in degrees
+        self.declare_parameter('min_point_distance', 3.0)       # Minimum distance filter (meters)
+        self.declare_parameter('max_negative_z', -0.5)          # Filter points below this Z value
         
         # Get vehicle filter parameters
         self.filter_vehicle_points = self.get_parameter('filter_vehicle_points').value
@@ -62,28 +71,43 @@ class LidarClient_clusters_2(Node):
         self.vehicle_height = self.get_parameter('vehicle_height').value
         self.vehicle_x_offset = self.get_parameter('vehicle_x_offset').value
         self.vehicle_y_offset = self.get_parameter('vehicle_y_offset').value
+        self.vehicle_z_offset = self.get_parameter('vehicle_z_offset').value
         self.vehicle_safety_margin = self.get_parameter('vehicle_safety_margin').value
+        self.vehicle_visualization = self.get_parameter('vehicle_visualization').value
+        
+        # Get LiDAR specific parameters
+        self.lidar_upper_fov = self.get_parameter('lidar_upper_fov').value
+        self.lidar_lower_fov = self.get_parameter('lidar_lower_fov').value
+        self.lidar_pitch_angle = self.get_parameter('lidar_pitch_angle').value
+        self.min_point_distance = self.get_parameter('min_point_distance').value
+        self.max_negative_z = self.get_parameter('max_negative_z').value
         
         # Calculate vehicle filter boundaries with safety margin
         self.vehicle_x_min = self.vehicle_x_offset - (self.vehicle_length / 2) - self.vehicle_safety_margin
         self.vehicle_x_max = self.vehicle_x_offset + (self.vehicle_length / 2) + self.vehicle_safety_margin
         self.vehicle_y_min = self.vehicle_y_offset - (self.vehicle_width / 2) - self.vehicle_safety_margin
         self.vehicle_y_max = self.vehicle_y_offset + (self.vehicle_width / 2) + self.vehicle_safety_margin
-        self.vehicle_z_min = -self.vehicle_safety_margin  # Assuming vehicle is at ground level
-        self.vehicle_z_max = self.vehicle_height + self.vehicle_safety_margin
+        self.vehicle_z_min = self.vehicle_z_offset - self.vehicle_safety_margin  # Adjusted to use z_offset
+        self.vehicle_z_max = self.vehicle_z_offset + self.vehicle_height + self.vehicle_safety_margin
         
         # Log vehicle filter settings
         if self.filter_vehicle_points:
             self.get_logger().info(f"Vehicle point filtering enabled")
             self.get_logger().info(f"Vehicle filter zone: X [{self.vehicle_x_min:.2f}, {self.vehicle_x_max:.2f}], " 
-                                 f"Y [{self.vehicle_y_min:.2f}, {self.vehicle_y_max:.2f}], "
-                                 f"Z [{self.vehicle_z_min:.2f}, {self.vehicle_z_max:.2f}]")
+                                   f"Y [{self.vehicle_y_min:.2f}, {self.vehicle_y_max:.2f}], "
+                                   f"Z [{self.vehicle_z_min:.2f}, {self.vehicle_z_max:.2f}]")
+            self.get_logger().info(f"LiDAR settings: Upper FOV: {self.lidar_upper_fov}°, Lower FOV: {self.lidar_lower_fov}°, "
+                                   f"Pitch: {self.lidar_pitch_angle}°")
+            self.get_logger().info(f"Point filtering: Min distance: {self.min_point_distance}m, Max negative Z: {self.max_negative_z}m")
         
         # Connection statistics
         self.last_receive_time = time.time()
         self.points_received = 0
         self.clusters_received = 0
         self.points_filtered = 0  # Track how many points are filtered out
+        self.distance_filtered = 0  # Track points filtered by distance
+        self.z_filtered = 0  # Track points filtered by z-value
+        self.vehicle_filtered = 0  # Track points filtered by vehicle boundary
         
         # TCP Client setup
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -114,16 +138,26 @@ class LidarClient_clusters_2(Node):
             
             stats_msg = f'Stats: {points_per_sec:.1f} points/s, {clusters_per_sec:.1f} clusters/s'
             if self.filter_vehicle_points:
-                filtered_per_sec = self.points_filtered / elapsed
+                total_filtered = self.distance_filtered + self.z_filtered + self.vehicle_filtered
+                filtered_per_sec = total_filtered / elapsed
                 filter_percentage = 0.0
-                if self.points_received + self.points_filtered > 0:
-                    filter_percentage = (self.points_filtered / (self.points_received + self.points_filtered)) * 100
+                if self.points_received + total_filtered > 0:
+                    filter_percentage = (total_filtered / (self.points_received + total_filtered)) * 100
                 stats_msg += f', filtered {filtered_per_sec:.1f} points/s ({filter_percentage:.1f}%)'
+                
+                # Add detailed breakdown of filtered points
+                if total_filtered > 0:
+                    dist_percent = (self.distance_filtered / total_filtered) * 100
+                    z_percent = (self.z_filtered / total_filtered) * 100
+                    veh_percent = (self.vehicle_filtered / total_filtered) * 100
+                    stats_msg += f' [dist: {dist_percent:.1f}%, z: {z_percent:.1f}%, veh: {veh_percent:.1f}%]'
                 
             self.get_logger().info(stats_msg)
             self.points_received = 0
             self.clusters_received = 0
-            self.points_filtered = 0
+            self.distance_filtered = 0
+            self.z_filtered = 0
+            self.vehicle_filtered = 0
             self.last_receive_time = now
 
     def receive_exact(self, size):
@@ -186,7 +220,7 @@ class LidarClient_clusters_2(Node):
     def receive_data(self):
         try:
             # First, publish the vehicle visualization if filtering is enabled
-            if self.filter_vehicle_points:
+            if self.filter_vehicle_points and self.vehicle_visualization:
                 self.publish_vehicle_visualization()
                 
             # Receive number of clusters
@@ -257,12 +291,24 @@ class LidarClient_clusters_2(Node):
                             self.get_logger().warn(f'Filtered extreme value: {x}, {y}, {z}')
                         continue
                     
-                    # Filter out points that are within the vehicle boundary
+                    # Apply minimum distance filter
                     if self.filter_vehicle_points:
+                        # Calculate distance from LiDAR origin (0,0,0)
+                        distance = math.sqrt(x**2 + y**2 + z**2)
+                        if distance < self.min_point_distance:
+                            self.distance_filtered += 1
+                            continue
+                        
+                        # Filter points with severe negative Z values (hitting car roof/hood)
+                        if z < self.max_negative_z:
+                            self.z_filtered += 1
+                            continue
+                        
+                        # Filter out points that are within the vehicle boundary
                         if (self.vehicle_x_min <= x <= self.vehicle_x_max and
                             self.vehicle_y_min <= y <= self.vehicle_y_max and
                             self.vehicle_z_min <= z <= self.vehicle_z_max):
-                            self.points_filtered += 1
+                            self.vehicle_filtered += 1
                             continue
                     
                     # Add the point
@@ -556,18 +602,18 @@ class LidarClient_clusters_2(Node):
         marker.type = Marker.CUBE
         marker.action = Marker.ADD
         
-        # Set position to vehicle center
+        # Set position to vehicle center, with z offset
         marker.pose.position.x = self.vehicle_x_offset
         marker.pose.position.y = self.vehicle_y_offset
-        marker.pose.position.z = self.vehicle_z_max / 2  # Center in Z
+        marker.pose.position.z = self.vehicle_z_offset + (self.vehicle_height / 2)  # Center in Z with offset
         
         # Set orientation (identity quaternion)
         marker.pose.orientation.w = 1.0
         
         # Set dimensions - using the filter boundaries
-        marker.scale.x = self.vehicle_x_max - self.vehicle_x_min
-        marker.scale.y = self.vehicle_y_max - self.vehicle_y_min
-        marker.scale.z = self.vehicle_z_max - self.vehicle_z_min
+        marker.scale.x = self.vehicle_length + (2 * self.vehicle_safety_margin)
+        marker.scale.y = self.vehicle_width + (2 * self.vehicle_safety_margin)
+        marker.scale.z = self.vehicle_height + (2 * self.vehicle_safety_margin)
         
         # Set color - red, semi-transparent
         marker.color.r = 1.0
