@@ -58,6 +58,13 @@ setup(
             'test_path_publisher = sensor_fusion.test_path_publisher:main',
             'trajectory_controller = sensor_fusion.trajectory_controller:main',
             'mpc_trajectory_controller = sensor_fusion.mpc_trajectory_controller:main',
+            'mpc_controller = sensor_fusion.mpc_controller:main',
+            'obstacle_visualizer = sensor_fusion.obstacle_visualizer:main',
+            'enhanced_camera_processor = sensor_fusion.enhanced_camera_processor_node:main',
+            'camera_processor = sensor_fusion.camera_processor:main',
+            'dwa_planner_node = sensor_fusion.dwa_planner_node:main',
+            'autonomous_dwa_node = sensor_fusion.autonomous_dwa_node:main',
+        
         ],
     },
 )
