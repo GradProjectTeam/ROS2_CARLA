@@ -34,6 +34,7 @@ setup(
             'lidar_realtime_mapper = sensor_fusion.lidar_realtime_mapper:main',
             'radar_costmap_creator = sensor_fusion.radar_costmap_creator:main',
             'radar_listener_clusters = sensor_fusion.radar_listener_clusters:main',
+            'radar_tf_publisher = sensor_fusion.radar_tf_publisher:main',
             'imu_listener = sensor_fusion.imu_listener:main',
             'imu_euler_visualizer = sensor_fusion.imu_euler_visualizer:main',
             'imu_lidar_yaw_fusion = sensor_fusion.imu_lidar_yaw_fusion:main',
