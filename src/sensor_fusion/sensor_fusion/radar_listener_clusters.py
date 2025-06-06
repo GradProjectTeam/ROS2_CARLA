@@ -30,9 +30,6 @@ class RadarClient_clusters(Node):
         self.debug_publisher = self.create_publisher(std_msgs.msg.String, '/radar/debug', 10)
         self.monitor_publisher = self.create_publisher(std_msgs.msg.String, '/radar/monitor_info', 10)
         
-        # TF broadcaster for radar frame
-        self.tf_broadcaster = TransformBroadcaster(self)
-        
         # TCP Client setup
         self.tcp_ip = '127.0.0.1'
         self.tcp_port = 12348 # ros port
@@ -85,31 +82,7 @@ class RadarClient_clusters(Node):
         # Create timer for stats reporting
         self.stats_timer = self.create_timer(5.0, self.report_stats)  # Report stats every 5 seconds
         
-        # Create timer for TF broadcasting
-        self.tf_timer = self.create_timer(0.05, self.broadcast_tf)  # 20Hz
-        
         self.get_logger().info('[RADAR] Radar processing node initialized successfully')
-
-    def broadcast_tf(self):
-        """Broadcast the radar frame transformation"""
-        t = TransformStamped()
-        t.header.stamp = self.get_clock().now().to_msg()
-        t.header.frame_id = "map"
-        t.child_frame_id = "radar"
-        
-        # Set the transform (position of radar relative to map frame)
-        t.transform.translation.x = 1.5  # Same as in CARLA setup
-        t.transform.translation.y = 0.5  # Same as in CARLA setup
-        t.transform.translation.z = 2.0  # Approximate height
-        
-        # Set rotation (identity quaternion - no rotation)
-        t.transform.rotation.x = 0.0
-        t.transform.rotation.y = 0.0
-        t.transform.rotation.z = 0.0
-        t.transform.rotation.w = 1.0
-        
-        # Broadcast the transform
-        self.tf_broadcaster.sendTransform(t)
 
     def report_stats(self):
         """Report statistics about received data"""
@@ -391,7 +364,7 @@ class RadarClient_clusters(Node):
         """Create occupancy grid message from numpy array"""
         grid_msg = OccupancyGrid()
         grid_msg.header.stamp = timestamp
-        grid_msg.header.frame_id = "map"
+        grid_msg.header.frame_id = "radar_link"
         
         grid_msg.info.resolution = self.grid_resolution
         grid_msg.info.width = grid_data.shape[0]
@@ -411,7 +384,7 @@ class RadarClient_clusters(Node):
     def create_cluster_marker(self, cluster_points, cluster_id, num_clusters, timestamp):
         """Create marker for cluster visualization with advanced coloring"""
         marker = Marker()
-        marker.header.frame_id = "map"
+        marker.header.frame_id = "radar_link"
         marker.header.stamp = timestamp
         marker.ns = f"radar_cluster_{cluster_id}"
         marker.id = cluster_id
@@ -467,7 +440,7 @@ class RadarClient_clusters(Node):
     def create_velocity_marker(self, cluster_points, cluster_id, timestamp):
         """Create velocity-colored marker for the cluster"""
         marker = Marker()
-        marker.header.frame_id = "map"
+        marker.header.frame_id = "radar_link"
         marker.header.stamp = timestamp
         marker.ns = "radar_velocity"
         marker.id = cluster_id
@@ -520,7 +493,7 @@ class RadarClient_clusters(Node):
     def create_velocity_vector_marker(self, x, y, z, velocity, cluster_id, timestamp):
         """Create an arrow marker showing velocity direction and magnitude"""
         marker = Marker()
-        marker.header.frame_id = "map"
+        marker.header.frame_id = "radar_link"
         marker.header.stamp = timestamp
         marker.ns = "velocity_vectors"
         marker.id = cluster_id
@@ -565,7 +538,7 @@ class RadarClient_clusters(Node):
         """Create a PointCloud2 message from a list of points"""
         pc2 = PointCloud2()
         pc2.header.stamp = self.get_clock().now().to_msg()
-        pc2.header.frame_id = "map"
+        pc2.header.frame_id = "radar_link"
         
         # Define the fields
         fields = [
