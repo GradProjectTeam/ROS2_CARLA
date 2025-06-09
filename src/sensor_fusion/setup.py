@@ -32,6 +32,7 @@ setup(
             'imu_processor = sensor_fusion.imu_processor:main',
             'lidar_costmap_creator = sensor_fusion.lidar_costmap_creator:main',
             'lidar_listener_clusters_2 = sensor_fusion.lidar_listener_clusters_2:main',
+            'lidar_listener_clusters_3 = sensor_fusion.lidar_listener_clusters_3:main',
             'lidar_listener_simple = sensor_fusion.lidar_listener_simple:main',
             'lidar_permanent_mapper = sensor_fusion.lidar_permanent_mapper:main',
             'lidar_realtime_mapper = sensor_fusion.lidar_realtime_mapper:main',
@@ -58,6 +59,8 @@ setup(
             'path_to_trajectory_converter = sensor_fusion.path_to_trajectory_converter:main',
             'trajectory_visualizer = sensor_fusion.trajectory_visualizer:main',
             'test_path_publisher = sensor_fusion.test_path_publisher:main',
+            'test_obstacle_publisher = sensor_fusion.test_obstacle_publisher:main',
+            'keyboard_teleop = sensor_fusion.keyboard_teleop:main',
             'trajectory_controller = sensor_fusion.trajectory_controller:main',
             'mpc_trajectory_controller = sensor_fusion.mpc_trajectory_controller:main',
             'mpc_controller = sensor_fusion.mpc_controller:main',
@@ -74,6 +77,13 @@ setup(
             'path_visualization_node = sensor_fusion.path_visualization_node:main',
             'goal_publisher_node = sensor_fusion.goal_publisher_node:main',
             'robot_controller_node = sensor_fusion.robot_controller_node:main',
+            'highway_follower_node = sensor_fusion.highway_follower_node:main',
+
+            # Autonomous exploration nodes
+            'autonomous_explorer = sensor_fusion.autonomous_explorer:main',
+            
+            # Test utilities
+            'empty_map_publisher = sensor_fusion.empty_map_publisher:main',
         ],
     },
 )
