@@ -12,11 +12,16 @@ import time
 import math
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from std_msgs.msg import ColorRGBA
+from threading import Lock
 
 # Our own implementation of quaternion_from_euler to replace tf_transformations
 def quaternion_from_euler(roll, pitch, yaw):
     """
     Convert Euler angles to quaternion based on the ZYX rotation sequence.
+    This is the standard for ground vehicles where:
+    - roll: rotation around X-axis (vehicle tilt left/right)
+    - pitch: rotation around Y-axis (vehicle tilt forward/backward)
+    - yaw: rotation around Z-axis (vehicle heading/direction)
     
     Args:
         roll: Rotation around X-axis in radians
@@ -41,6 +46,37 @@ def quaternion_from_euler(roll, pitch, yaw):
     
     return q
 
+# Our own implementation of euler_from_quaternion
+def euler_from_quaternion(x, y, z, w):
+    """
+    Convert quaternion to Euler angles (roll, pitch, yaw) for vehicle orientation
+    
+    For ground vehicles:
+    - roll: rotation around X-axis (vehicle tilt left/right)
+    - pitch: rotation around Y-axis (vehicle tilt forward/backward)
+    - yaw: rotation around Z-axis (vehicle heading/direction)
+    
+    Returns angles in radians
+    """
+    # Roll (x-axis rotation)
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+    
+    # Pitch (y-axis rotation)
+    sinp = 2.0 * (w * y - z * x)
+    if abs(sinp) >= 1:
+        pitch = math.copysign(math.pi / 2, sinp)  # Use 90 degrees if out of range
+    else:
+        pitch = math.asin(sinp)
+    
+    # Yaw (z-axis rotation)
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    
+    return roll, pitch, yaw
+
 # ANSI color codes for prettier output
 class Colors:
     HEADER = '\033[95m'
@@ -57,13 +93,29 @@ class ImuEulerVisualizer(Node):
     def __init__(self):
         super().__init__('imu_euler_visualizer')
         
-        # Declare parameters
-        self.declare_parameter('tcp_ip', '127.0.0.1')
-        self.declare_parameter('tcp_port', 12345)  # TCP port for IMU data
-        self.declare_parameter('reconnect_interval', 5.0)
-        self.declare_parameter('frame_id', 'imu_link')
-        self.declare_parameter('world_frame_id', 'world')
-        self.declare_parameter('filter_window_size', 5)
+        # Declare parameters with existence check to prevent ParameterAlreadyDeclaredException
+        if not self.has_parameter('use_sim_time'):
+            self.declare_parameter('use_sim_time', False)
+        if not self.has_parameter('tcp_ip'):
+            self.declare_parameter('tcp_ip', '127.0.0.1')
+        if not self.has_parameter('tcp_port'):
+            self.declare_parameter('tcp_port', 12345)  # TCP port for IMU data
+        if not self.has_parameter('reconnect_interval'):
+            self.declare_parameter('reconnect_interval', 5.0)
+        if not self.has_parameter('frame_id'):
+            self.declare_parameter('frame_id', 'imu_link')
+        if not self.has_parameter('world_frame_id'):
+            self.declare_parameter('world_frame_id', 'world')
+        if not self.has_parameter('filter_window_size'):
+            self.declare_parameter('filter_window_size', 5)
+        if not self.has_parameter('yaw_offset'):
+            self.declare_parameter('yaw_offset', 0.0)  # Offset to align IMU with vehicle forward direction
+        if not self.has_parameter('road_plane_correction'):
+            self.declare_parameter('road_plane_correction', True)  # Correct for road plane
+        if not self.has_parameter('gravity_aligned'):
+            self.declare_parameter('gravity_aligned', True)  # Align with gravity
+        if not self.has_parameter('vehicle_forward_axis'):
+            self.declare_parameter('vehicle_forward_axis', 'x')
         
         # Get parameters
         self.tcp_ip = self.get_parameter('tcp_ip').value
@@ -72,6 +124,10 @@ class ImuEulerVisualizer(Node):
         self.frame_id = self.get_parameter('frame_id').value
         self.world_frame_id = self.get_parameter('world_frame_id').value
         self.filter_window_size = self.get_parameter('filter_window_size').value
+        self.yaw_offset = self.get_parameter('yaw_offset').value
+        self.road_plane_correction = self.get_parameter('road_plane_correction').value
+        self.gravity_aligned = self.get_parameter('gravity_aligned').value
+        self.vehicle_forward_axis = self.get_parameter('vehicle_forward_axis').value.lower()
         
         # TF broadcaster for publishing IMU transforms
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -140,6 +196,10 @@ class ImuEulerVisualizer(Node):
         print(f"Publishing Euler angle visualization markers on topic: {Colors.CYAN}imu/euler_markers{Colors.ENDC}")
         print(f"Also publishing standard IMU data on topic: {Colors.CYAN}imu/data{Colors.ENDC}")
         print(f"Publishing TF transform between {Colors.GREEN}{self.world_frame_id}{Colors.ENDC} and {Colors.GREEN}{self.frame_id}{Colors.ENDC}")
+        print(f"Yaw offset: {Colors.YELLOW}{math.degrees(self.yaw_offset):.2f}°{Colors.ENDC}")
+        print(f"Road plane correction: {Colors.YELLOW}{self.road_plane_correction}{Colors.ENDC}")
+        print(f"Gravity aligned: {Colors.YELLOW}{self.gravity_aligned}{Colors.ENDC}")
+        print(f"Vehicle forward axis: {Colors.YELLOW}{self.vehicle_forward_axis}{Colors.ENDC}")
         print("="*80 + "\n")
         
     def connect(self):
@@ -221,6 +281,46 @@ class ImuEulerVisualizer(Node):
                 pitch_rad = math.radians(pitch_deg)
                 yaw_rad = math.radians(yaw_deg)
                 
+                # Apply yaw offset to align with vehicle forward direction
+                yaw_rad = yaw_rad + self.yaw_offset
+                
+                # Normalize yaw to [-pi, pi]
+                while yaw_rad > math.pi:
+                    yaw_rad -= 2.0 * math.pi
+                while yaw_rad < -math.pi:
+                    yaw_rad += 2.0 * math.pi
+                
+                # If gravity aligned, use accelerometer to determine true roll and pitch
+                if self.gravity_aligned:
+                    # Calculate roll and pitch from accelerometer (gravity vector)
+                    # This is more accurate for vehicle orientation relative to ground
+                    accel_magnitude = math.sqrt(accel_x*accel_x + accel_y*accel_y + accel_z*accel_z)
+                    
+                    if accel_magnitude > 0.1:  # Ensure we have valid accelerometer data
+                        # Normalize accelerometer values
+                        accel_x_norm = accel_x / accel_magnitude
+                        accel_y_norm = accel_y / accel_magnitude
+                        accel_z_norm = accel_z / accel_magnitude
+                        
+                        # Calculate roll (rotation around X-axis) - positive is right tilt
+                        accel_roll = math.atan2(accel_y_norm, math.sqrt(accel_x_norm*accel_x_norm + accel_z_norm*accel_z_norm))
+                        
+                        # Calculate pitch (rotation around Y-axis) - positive is forward tilt
+                        accel_pitch = -math.atan2(accel_x_norm, math.sqrt(accel_y_norm*accel_y_norm + accel_z_norm*accel_z_norm))
+                        
+                        # Blend with gyro-derived values for stability (complementary filter)
+                        # Use more weight from accelerometer for roll and pitch
+                        roll_rad = 0.8 * accel_roll + 0.2 * roll_rad
+                        pitch_rad = 0.8 * accel_pitch + 0.2 * pitch_rad
+                
+                # Apply road plane correction if enabled
+                if self.road_plane_correction:
+                    # For vehicles, we often want to minimize roll and pitch
+                    # to represent orientation relative to the road plane
+                    # This is useful when the IMU is not perfectly aligned with the vehicle
+                    roll_rad *= 0.8  # Reduce roll influence
+                    pitch_rad *= 0.8  # Reduce pitch influence
+                
                 # Apply moving average filter to smooth data
                 accel_x = self.apply_moving_average(accel_x, self.accel_x_buffer)
                 accel_y = self.apply_moving_average(accel_y, self.accel_y_buffer)
@@ -231,6 +331,11 @@ class ImuEulerVisualizer(Node):
                 roll_rad = self.apply_moving_average(roll_rad, self.roll_buffer)
                 pitch_rad = self.apply_moving_average(pitch_rad, self.pitch_buffer)
                 yaw_rad = self.apply_moving_average(yaw_rad, self.yaw_buffer)
+                
+                # Convert back to degrees for visualization
+                roll_deg = math.degrees(roll_rad)
+                pitch_deg = math.degrees(pitch_rad)
+                yaw_deg = math.degrees(yaw_rad)
                 
                 # Publish the standard IMU data for backward compatibility
                 self.publish_imu_data(accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, roll_rad, pitch_rad, yaw_rad)
@@ -433,8 +538,28 @@ class ImuEulerVisualizer(Node):
     def publish_tf_transform(self, roll, pitch, yaw):
         """Publish TF transform for visualization"""
         try:
-            # Create quaternion from roll, pitch, yaw
-            q = quaternion_from_euler(roll, pitch, yaw)
+            # Adjust orientation based on vehicle forward axis
+            adjusted_yaw = yaw
+            
+            # This ensures the vehicle's forward direction aligns with the expected axis
+            if self.vehicle_forward_axis == 'y':
+                # If vehicle forward is Y-axis, rotate 90 degrees around Z
+                adjusted_yaw += math.pi/2
+            elif self.vehicle_forward_axis == '-x':
+                # If vehicle forward is negative X-axis, rotate 180 degrees around Z
+                adjusted_yaw += math.pi
+            elif self.vehicle_forward_axis == '-y':
+                # If vehicle forward is negative Y-axis, rotate -90 degrees around Z
+                adjusted_yaw -= math.pi/2
+            
+            # Normalize adjusted yaw
+            while adjusted_yaw > math.pi:
+                adjusted_yaw -= 2.0 * math.pi
+            while adjusted_yaw < -math.pi:
+                adjusted_yaw += 2.0 * math.pi
+            
+            # Create quaternion from roll, pitch, adjusted yaw
+            q = quaternion_from_euler(roll, pitch, adjusted_yaw)
             
             # Create and publish transform
             t = TransformStamped()
@@ -474,8 +599,28 @@ class ImuEulerVisualizer(Node):
             gyro_y_rad = gyro_y
             gyro_z_rad = gyro_z
             
-            # Set orientation from Euler angles
-            q = quaternion_from_euler(roll, pitch, yaw)
+            # Adjust orientation based on vehicle forward axis
+            adjusted_yaw = yaw
+            
+            # This ensures the vehicle's forward direction aligns with the expected axis
+            if self.vehicle_forward_axis == 'y':
+                # If vehicle forward is Y-axis, rotate 90 degrees around Z
+                adjusted_yaw += math.pi/2
+            elif self.vehicle_forward_axis == '-x':
+                # If vehicle forward is negative X-axis, rotate 180 degrees around Z
+                adjusted_yaw += math.pi
+            elif self.vehicle_forward_axis == '-y':
+                # If vehicle forward is negative Y-axis, rotate -90 degrees around Z
+                adjusted_yaw -= math.pi/2
+            
+            # Normalize adjusted yaw
+            while adjusted_yaw > math.pi:
+                adjusted_yaw -= 2.0 * math.pi
+            while adjusted_yaw < -math.pi:
+                adjusted_yaw += 2.0 * math.pi
+            
+            # Set orientation from Euler angles with adjusted yaw
+            q = quaternion_from_euler(roll, pitch, adjusted_yaw)
             imu_msg.orientation = Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
             
             # Set orientation covariance (small values for good confidence)

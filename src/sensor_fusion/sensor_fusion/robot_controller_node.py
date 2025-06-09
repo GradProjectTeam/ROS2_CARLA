@@ -7,6 +7,8 @@ from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped, Twist, Point
 from visualization_msgs.msg import Marker
 from tf2_ros import TransformListener, Buffer, TransformException
+
+from carla_msgs.msg import CarlaEgoVehicleControl  # Import CARLA control message type
 import math
 import numpy as np
 from collections import deque
@@ -20,6 +22,8 @@ class RobotControllerNode(Node):
             self.declare_parameter('use_sim_time', False)
             
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
+
+        self.declare_parameter('carla_control_topic', '/carla/ego_vehicle/vehicle_control_cmd')  # CARLA control topic
         self.declare_parameter('local_path_topic', '/local_path')
         self.declare_parameter('map_frame_id', 'map')
         self.declare_parameter('base_frame_id', 'base_link')
@@ -36,8 +40,20 @@ class RobotControllerNode(Node):
         self.declare_parameter('pid_i_gain', 0.1)
         self.declare_parameter('pid_d_gain', 0.1)
         
+
+        # CARLA specific parameters
+        self.declare_parameter('enable_carla_control', True)  # Enable CARLA control
+        self.declare_parameter('max_throttle', 1.0)  # Maximum throttle value (0-1)
+        self.declare_parameter('max_brake', 1.0)  # Maximum brake value (0-1)
+        self.declare_parameter('max_steer', 1.0)  # Maximum steering value (-1 to 1)
+        self.declare_parameter('throttle_gain', 1.0)  # Gain for throttle conversion
+        self.declare_parameter('brake_gain', 1.0)  # Gain for brake conversion
+        self.declare_parameter('steer_gain', 1.0)  # Gain for steering conversion
+        self.declare_parameter('steer_ratio', 1.0)  # Steering ratio for converting angular velocity to steering angle
+        
         # Get parameters
         self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').get_parameter_value().string_value
+        self.carla_control_topic = self.get_parameter('carla_control_topic').get_parameter_value().string_value
         self.local_path_topic = self.get_parameter('local_path_topic').get_parameter_value().string_value
         self.map_frame_id = self.get_parameter('map_frame_id').get_parameter_value().string_value
         self.base_frame_id = self.get_parameter('base_frame_id').get_parameter_value().string_value
@@ -53,6 +69,17 @@ class RobotControllerNode(Node):
         self.pid_p_gain = self.get_parameter('pid_p_gain').get_parameter_value().double_value
         self.pid_i_gain = self.get_parameter('pid_i_gain').get_parameter_value().double_value
         self.pid_d_gain = self.get_parameter('pid_d_gain').get_parameter_value().double_value
+        
+
+        # Get CARLA specific parameters
+        self.enable_carla_control = self.get_parameter('enable_carla_control').get_parameter_value().bool_value
+        self.max_throttle = self.get_parameter('max_throttle').get_parameter_value().double_value
+        self.max_brake = self.get_parameter('max_brake').get_parameter_value().double_value
+        self.max_steer = self.get_parameter('max_steer').get_parameter_value().double_value
+        self.throttle_gain = self.get_parameter('throttle_gain').get_parameter_value().double_value
+        self.brake_gain = self.get_parameter('brake_gain').get_parameter_value().double_value
+        self.steer_gain = self.get_parameter('steer_gain').get_parameter_value().double_value
+        self.steer_ratio = self.get_parameter('steer_ratio').get_parameter_value().double_value
         
         # Initialize variables
         self.local_path = None
@@ -87,6 +114,14 @@ class RobotControllerNode(Node):
             qos_profile
         )
         
+
+        # Create CARLA control publisher
+        self.carla_control_pub = self.create_publisher(
+            CarlaEgoVehicleControl,
+            self.carla_control_topic,
+            qos_profile
+        )
+        
         # Create visualization publisher
         self.target_vis_pub = self.create_publisher(
             Marker,
@@ -105,6 +140,9 @@ class RobotControllerNode(Node):
         )
         
         self.get_logger().info('Robot controller node initialized')
+
+        if self.enable_carla_control:
+            self.get_logger().info(f'CARLA control enabled, publishing to {self.carla_control_topic}')
     
     def local_path_callback(self, msg):
         """Callback for local path updates"""
@@ -118,6 +156,12 @@ class RobotControllerNode(Node):
             # No path to follow, stop the robot
             cmd_vel = Twist()
             self.cmd_vel_pub.publish(cmd_vel)
+
+            
+            # Also stop CARLA vehicle if enabled
+            if self.enable_carla_control:
+                carla_control = self.convert_to_carla_control(cmd_vel)
+                self.carla_control_pub.publish(carla_control)
             return
         
         try:
@@ -156,6 +200,12 @@ class RobotControllerNode(Node):
                 # Stop the robot
                 cmd_vel = Twist()
                 self.cmd_vel_pub.publish(cmd_vel)
+
+                
+                # Also stop CARLA vehicle if enabled
+                if self.enable_carla_control:
+                    carla_control = self.convert_to_carla_control(cmd_vel)
+                    self.carla_control_pub.publish(carla_control)
                 return
             
             # Calculate velocity commands based on the control method
@@ -170,11 +220,50 @@ class RobotControllerNode(Node):
             
             # Publish velocity commands
             self.cmd_vel_pub.publish(cmd_vel)
+
+            
+            # Convert and publish CARLA control if enabled
+            if self.enable_carla_control:
+                carla_control = self.convert_to_carla_control(cmd_vel)
+                self.carla_control_pub.publish(carla_control)
+                self.get_logger().debug(f'Published CARLA control: throttle={carla_control.throttle:.2f}, '
+                                      f'steer={carla_control.steer:.2f}, brake={carla_control.brake:.2f}')
         
         except TransformException as e:
             self.get_logger().warn(f'Transform error: {str(e)}')
         except Exception as e:
             self.get_logger().error(f'Error in robot control: {str(e)}')
+    
+
+    def convert_to_carla_control(self, cmd_vel):
+        """Convert ROS Twist message to CARLA control message"""
+        carla_control = CarlaEgoVehicleControl()
+        
+        # Convert linear velocity to throttle/brake
+        linear_vel = cmd_vel.linear.x
+        if linear_vel >= 0:
+            # Forward motion - apply throttle
+            carla_control.throttle = min(self.max_throttle, linear_vel * self.throttle_gain / self.max_linear_velocity)
+            carla_control.brake = 0.0
+            carla_control.reverse = False
+        else:
+            # Backward motion - apply brake or reverse
+            carla_control.throttle = min(self.max_throttle, abs(linear_vel) * self.throttle_gain / self.max_linear_velocity)
+            carla_control.brake = 0.0
+            carla_control.reverse = True
+        
+        # Convert angular velocity to steering
+        # CARLA uses -1 (right) to 1 (left) for steering
+        angular_vel = cmd_vel.angular.z
+        carla_control.steer = max(-self.max_steer, min(self.max_steer, 
+                                  angular_vel * self.steer_gain * self.steer_ratio / self.max_angular_velocity))
+        
+        # Set other CARLA control parameters
+        carla_control.hand_brake = False
+        carla_control.manual_gear_shift = False
+        carla_control.gear = 0  # Auto
+        
+        return carla_control
     
     def pure_pursuit_control(self):
         """Implement pure pursuit control algorithm"""

@@ -211,8 +211,10 @@ class GlobalPlannerNode(Node):
             return False
         
         idx = y * self.map_width + x
-        # Check if cell is free (value < 50 in occupancy grid)
-        return self.map_data.data[idx] < 90
+
+        # Use a lower threshold (70 instead of 90) to be more conservative about obstacles
+        # This will treat more cells as obstacles, making paths avoid gray areas
+        return self.map_data.data[idx] < 70
     
     def heuristic(self, a, b):
         """Calculate heuristic distance between two grid cells"""
