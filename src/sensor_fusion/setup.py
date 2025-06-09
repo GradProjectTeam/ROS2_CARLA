@@ -38,6 +38,13 @@ setup(
             'imu_listener = sensor_fusion.imu_listener:main',
             'imu_euler_visualizer = sensor_fusion.imu_euler_visualizer:main',
             'imu_lidar_yaw_fusion = sensor_fusion.imu_lidar_yaw_fusion:main',
+            
+             # Motion planning nodes
+            'global_planner_node = sensor_fusion.global_planner_node:main',
+            'local_planner_node = sensor_fusion.local_planner_node:main',
+            'path_visualization_node = sensor_fusion.path_visualization_node:main',
+            'goal_publisher_node = sensor_fusion.goal_publisher_node:main',
+            'robot_controller_node = sensor_fusion.robot_controller_node:main',
         ],
     },
 )
