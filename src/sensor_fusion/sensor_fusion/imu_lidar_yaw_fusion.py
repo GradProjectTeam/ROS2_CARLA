@@ -19,7 +19,14 @@ import tf2_ros
 # Convert quaternion to Euler angles
 def euler_from_quaternion(x, y, z, w):
     """
-    Convert quaternion to Euler angles (roll, pitch, yaw)
+    Convert quaternion to Euler angles (roll, pitch, yaw) for vehicle orientation
+    
+    For ground vehicles:
+    - roll: rotation around X-axis (vehicle tilt left/right)
+    - pitch: rotation around Y-axis (vehicle tilt forward/backward)
+    - yaw: rotation around Z-axis (vehicle heading/direction)
+    
+    Returns angles in radians
     """
     # Roll (x-axis rotation)
     sinr_cosp = 2.0 * (w * x + y * z)
@@ -40,6 +47,34 @@ def euler_from_quaternion(x, y, z, w):
     
     return roll, pitch, yaw
 
+# Convert Euler angles to quaternion
+def quaternion_from_euler(roll, pitch, yaw):
+    """
+    Convert Euler angles to quaternion for vehicle orientation
+    
+    Args:
+        roll: Rotation around X-axis in radians
+        pitch: Rotation around Y-axis in radians
+        yaw: Rotation around Z-axis in radians
+        
+    Returns:
+        [x, y, z, w] quaternion
+    """
+    cy = math.cos(yaw * 0.5)
+    sy = math.sin(yaw * 0.5)
+    cp = math.cos(pitch * 0.5)
+    sp = math.sin(pitch * 0.5)
+    cr = math.cos(roll * 0.5)
+    sr = math.sin(roll * 0.5)
+    
+    q = [0, 0, 0, 0]
+    q[0] = sr * cp * cy - cr * sp * sy  # x
+    q[1] = cr * sp * cy + sr * cp * sy  # y
+    q[2] = cr * cp * sy - sr * sp * cy  # z
+    q[3] = cr * cp * cy + sr * sp * sy  # w
+    
+    return q
+
 class ImuLidarYawFusion(Node):
     """
     Fuses IMU yaw data with the realtime lidar map to improve mapping accuracy.
@@ -55,24 +90,49 @@ class ImuLidarYawFusion(Node):
     def __init__(self):
         super().__init__('imu_lidar_yaw_fusion')
         
-        # Declare parameters
-        self.declare_parameter('imu_topic', '/imu/data')
-        self.declare_parameter('map_topic', '/realtime_map')  # Changed to use realtime_map instead of permanent_map
-        self.declare_parameter('publish_rate', 30.0)  # Increased rate for more responsiveness
-        self.declare_parameter('initial_yaw_offset', 0.0)  # Initial yaw offset in radians
-        self.declare_parameter('use_filtered_yaw', True)  # Use filtered yaw
-        self.declare_parameter('yaw_filter_size', 5)  # Smaller filter size for quicker response
-        self.declare_parameter('yaw_weight', 0.95)  # Higher weight of yaw in fusion (0-1)
-        self.declare_parameter('enable_auto_save', True)  # Auto-save map periodically
-        self.declare_parameter('auto_save_interval', 30.0)  # Auto-save interval in seconds
-        self.declare_parameter('map_save_dir', '/home/mostafa/GP/ROS2/maps')  # Directory to save maps
-        self.declare_parameter('publish_tf', True)  # Whether to publish TF
-        self.declare_parameter('map_frame_id', 'map')  # Map frame ID
-        self.declare_parameter('base_frame_id', 'base_link')  # Base frame ID
-        self.declare_parameter('override_static_tf', True)  # Whether to override static TF
-        self.declare_parameter('publish_tf_rate', 100.0)  # Higher rate for TF publishing
-        self.declare_parameter('all_white_map', True)  # New parameter for all-white map mode
-        self.declare_parameter('invert_map_colors', False)  # New parameter to invert colors if needed
+        # Declare parameters with existence check
+        if not self.has_parameter('use_sim_time'):
+            self.declare_parameter('use_sim_time', False)
+        if not self.has_parameter('imu_topic'):
+            self.declare_parameter('imu_topic', '/imu/data')
+        if not self.has_parameter('map_topic'):
+            self.declare_parameter('map_topic', '/realtime_map')  # Changed to use realtime_map instead of permanent_map
+        if not self.has_parameter('publish_rate'):
+            self.declare_parameter('publish_rate', 30.0)  # Increased rate for more responsiveness
+        if not self.has_parameter('initial_yaw_offset'):
+            self.declare_parameter('initial_yaw_offset', 0.0)  # Initial yaw offset in radians
+        if not self.has_parameter('use_filtered_yaw'):
+            self.declare_parameter('use_filtered_yaw', True)  # Use filtered yaw
+        if not self.has_parameter('yaw_filter_size'):
+            self.declare_parameter('yaw_filter_size', 5)  # Smaller filter size for quicker response
+        if not self.has_parameter('yaw_weight'):
+            self.declare_parameter('yaw_weight', 0.95)  # Higher weight of yaw in fusion (0-1)
+        if not self.has_parameter('enable_auto_save'):
+            self.declare_parameter('enable_auto_save', True)  # Auto-save map periodically
+        if not self.has_parameter('auto_save_interval'):
+            self.declare_parameter('auto_save_interval', 30.0)  # Auto-save interval in seconds
+        if not self.has_parameter('map_save_dir'):
+            self.declare_parameter('map_save_dir', '/home/mostafa/GP/ROS2/maps')  # Directory to save maps
+        if not self.has_parameter('publish_tf'):
+            self.declare_parameter('publish_tf', True)  # Whether to publish TF
+        if not self.has_parameter('map_frame_id'):
+            self.declare_parameter('map_frame_id', 'map')  # Map frame ID
+        if not self.has_parameter('base_frame_id'):
+            self.declare_parameter('base_frame_id', 'base_link')  # Base frame ID
+        if not self.has_parameter('override_static_tf'):
+            self.declare_parameter('override_static_tf', True)  # Whether to override static TF
+        if not self.has_parameter('publish_tf_rate'):
+            self.declare_parameter('publish_tf_rate', 100.0)  # Higher rate for TF publishing
+        if not self.has_parameter('all_white_map'):
+            self.declare_parameter('all_white_map', True)  # New parameter for all-white map mode
+        if not self.has_parameter('invert_map_colors'):
+            self.declare_parameter('invert_map_colors', False)  # New parameter to invert colors if needed
+        if not self.has_parameter('road_plane_correction'):
+            self.declare_parameter('road_plane_correction', True)  # Correct for road plane
+        if not self.has_parameter('gravity_aligned'):
+            self.declare_parameter('gravity_aligned', True)  # Align with gravity
+        if not self.has_parameter('vehicle_forward_axis'):
+            self.declare_parameter('vehicle_forward_axis', 'x')  # Vehicle forward axis (x, y, or z)
         
         # Get parameters
         self.imu_topic = self.get_parameter('imu_topic').value
@@ -92,6 +152,9 @@ class ImuLidarYawFusion(Node):
         self.publish_tf_rate = self.get_parameter('publish_tf_rate').value
         self.all_white_map = self.get_parameter('all_white_map').value
         self.invert_map_colors = self.get_parameter('invert_map_colors').value
+        self.road_plane_correction = self.get_parameter('road_plane_correction').value
+        self.gravity_aligned = self.get_parameter('gravity_aligned').value
+        self.vehicle_forward_axis = self.get_parameter('vehicle_forward_axis').value.lower()
         
         # Ensure map save directory exists
         if not os.path.exists(self.map_save_dir):
@@ -105,11 +168,22 @@ class ImuLidarYawFusion(Node):
         self.current_map = None
         self.map_metadata = None
         self.current_yaw = 0.0
+        self.current_roll = 0.0
+        self.current_pitch = 0.0
         self.yaw_buffer = []
+        self.roll_buffer = []
+        self.pitch_buffer = []
         self.filtered_yaw = 0.0
+        self.filtered_roll = 0.0
+        self.filtered_pitch = 0.0
         self.initial_map_orientation = None
         self.map_transformed = False
         self.last_save_time = time.time()
+        
+        # Store accelerometer data for gravity alignment
+        self.accel_x = 0.0
+        self.accel_y = 0.0
+        self.accel_z = 0.0
         
         # Locks for thread safety
         self.map_lock = Lock()
@@ -184,6 +258,9 @@ class ImuLidarYawFusion(Node):
         self.get_logger().info(f'Using filtered yaw: {self.use_filtered_yaw}')
         self.get_logger().info(f'Initial yaw offset: {math.degrees(self.initial_yaw_offset):.2f} degrees')
         self.get_logger().info(f'All-white map mode: {self.all_white_map}')
+        self.get_logger().info(f'Road plane correction: {self.road_plane_correction}')
+        self.get_logger().info(f'Gravity aligned: {self.gravity_aligned}')
+        self.get_logger().info(f'Vehicle forward axis: {self.vehicle_forward_axis}')
     
     def imu_callback(self, msg):
         """Process incoming IMU data to extract yaw information"""
@@ -197,17 +274,79 @@ class ImuLidarYawFusion(Node):
             # Convert to Euler angles
             roll, pitch, yaw = euler_from_quaternion(qx, qy, qz, qw)
             
+            # Store accelerometer data for gravity alignment
+            self.accel_x = msg.linear_acceleration.x
+            self.accel_y = msg.linear_acceleration.y
+            self.accel_z = msg.linear_acceleration.z
+            
+            # Apply gravity alignment if enabled
+            if self.gravity_aligned and (self.accel_x != 0.0 or self.accel_y != 0.0 or self.accel_z != 0.0):
+                # Calculate magnitude of acceleration
+                accel_magnitude = math.sqrt(self.accel_x**2 + self.accel_y**2 + self.accel_z**2)
+                
+                if accel_magnitude > 0.1:  # Ensure we have valid accelerometer data
+                    # Normalize accelerometer values
+                    accel_x_norm = self.accel_x / accel_magnitude
+                    accel_y_norm = self.accel_y / accel_magnitude
+                    accel_z_norm = self.accel_z / accel_magnitude
+                    
+                    # Calculate roll (rotation around X-axis) - positive is right tilt
+                    accel_roll = math.atan2(accel_y_norm, math.sqrt(accel_x_norm**2 + accel_z_norm**2))
+                    
+                    # Calculate pitch (rotation around Y-axis) - positive is forward tilt
+                    accel_pitch = -math.atan2(accel_x_norm, math.sqrt(accel_y_norm**2 + accel_z_norm**2))
+                    
+                    # Blend with gyro-derived values for stability (complementary filter)
+                    # Use more weight from accelerometer for roll and pitch
+                    roll = 0.8 * accel_roll + 0.2 * roll
+                    pitch = 0.8 * accel_pitch + 0.2 * pitch
+            
+            # Apply road plane correction if enabled
+            if self.road_plane_correction:
+                # For vehicles on roads, we often want to minimize roll and pitch
+                roll *= 0.8  # Reduce roll influence
+                pitch *= 0.8  # Reduce pitch influence
+            
             # Apply initial offset (e.g., for calibration)
             yaw += self.initial_yaw_offset
             
-            # Store the current yaw
+            # Normalize yaw to [-pi, pi]
+            while yaw > math.pi:
+                yaw -= 2.0 * math.pi
+            while yaw < -math.pi:
+                yaw += 2.0 * math.pi
+            
+            # Store the current orientation
+            self.current_roll = roll
+            self.current_pitch = pitch
             self.current_yaw = yaw
             
             # Apply moving average filter if enabled
             if self.use_filtered_yaw:
+                # Roll filter
+                self.roll_buffer.append(roll)
+                if len(self.roll_buffer) > self.yaw_filter_size:
+                    self.roll_buffer.pop(0)
+                
+                # Pitch filter
+                self.pitch_buffer.append(pitch)
+                if len(self.pitch_buffer) > self.yaw_filter_size:
+                    self.pitch_buffer.pop(0)
+                
+                # Yaw filter
                 self.yaw_buffer.append(yaw)
                 if len(self.yaw_buffer) > self.yaw_filter_size:
                     self.yaw_buffer.pop(0)
+                
+                # Compute filtered roll (handle wrap-around for angles)
+                sin_sum = sum(math.sin(r) for r in self.roll_buffer)
+                cos_sum = sum(math.cos(r) for r in self.roll_buffer)
+                self.filtered_roll = math.atan2(sin_sum, cos_sum)
+                
+                # Compute filtered pitch (handle wrap-around for angles)
+                sin_sum = sum(math.sin(p) for p in self.pitch_buffer)
+                cos_sum = sum(math.cos(p) for p in self.pitch_buffer)
+                self.filtered_pitch = math.atan2(sin_sum, cos_sum)
                 
                 # Compute filtered yaw (handle wrap-around for angles)
                 sin_sum = sum(math.sin(y) for y in self.yaw_buffer)
@@ -267,6 +406,41 @@ class ImuLidarYawFusion(Node):
             # Get the map center for rotation
             center_x = width // 2
             center_y = height // 2
+            
+            # Detect if there's significant motion by checking the rate of yaw change
+            # This helps determine how much to trust the IMU data
+            current_time = time.time()
+            if hasattr(self, 'last_yaw_time') and hasattr(self, 'last_fusion_yaw'):
+                time_diff = current_time - self.last_yaw_time
+                if time_diff > 0:
+                    yaw_rate = abs(fusion_yaw - self.last_fusion_yaw) / time_diff
+                    
+                    # Adjust fusion weight based on motion
+                    # Higher yaw rate = more weight to IMU (we trust it more during motion)
+                    # Lower yaw rate = less weight to IMU (we trust the map more when stationary)
+                    if hasattr(self, 'adaptive_fusion') and self.adaptive_fusion:
+                        # Define thresholds for motion detection
+                        motion_threshold = getattr(self, 'motion_threshold', 0.05)
+                        
+                        if yaw_rate > motion_threshold:
+                            # Vehicle is likely moving - use moving fusion weight
+                            effective_weight = getattr(self, 'moving_fusion_weight', 0.98)
+                            self.get_logger().debug(f"Motion detected (yaw_rate={yaw_rate:.3f}), using weight={effective_weight:.2f}")
+                        else:
+                            # Vehicle is likely stationary - use stationary fusion weight
+                            effective_weight = getattr(self, 'stationary_fusion_weight', 0.9)
+                            self.get_logger().debug(f"Stationary (yaw_rate={yaw_rate:.3f}), using weight={effective_weight:.2f}")
+                    else:
+                        # Use default weight if adaptive fusion is not enabled
+                        effective_weight = self.yaw_weight
+                else:
+                    effective_weight = self.yaw_weight
+            else:
+                effective_weight = self.yaw_weight
+            
+            # Store current values for next iteration
+            self.last_yaw_time = current_time
+            self.last_fusion_yaw = fusion_yaw
             
             # Create rotation matrix
             rot_mat = cv2.getRotationMatrix2D((center_x, center_y), math.degrees(fusion_yaw), 1.0)
@@ -397,8 +571,30 @@ class ImuLidarYawFusion(Node):
             return
         
         with self.yaw_lock:
-            # Get the yaw to use (filtered or raw)
-            tf_yaw = self.filtered_yaw if self.use_filtered_yaw else self.current_yaw
+            # Get the orientation values to use (filtered or raw)
+            if self.use_filtered_yaw:
+                roll = self.filtered_roll
+                pitch = self.filtered_pitch
+                yaw = self.filtered_yaw
+            else:
+                roll = self.current_roll
+                pitch = self.current_pitch
+                yaw = self.current_yaw
+            
+            # Adjust orientation based on vehicle forward axis
+            # This ensures the vehicle's forward direction aligns with the expected axis
+            if self.vehicle_forward_axis == 'y':
+                # If vehicle forward is Y-axis, rotate 90 degrees around Z
+                yaw += math.pi/2
+            elif self.vehicle_forward_axis == '-x':
+                # If vehicle forward is negative X-axis, rotate 180 degrees around Z
+                yaw += math.pi
+            elif self.vehicle_forward_axis == '-y':
+                # If vehicle forward is negative Y-axis, rotate -90 degrees around Z
+                yaw -= math.pi/2
+            
+            # Create quaternion from roll, pitch, yaw
+            q = quaternion_from_euler(roll, pitch, yaw)
             
             # Create transform message
             t = TransformStamped()
@@ -412,10 +608,10 @@ class ImuLidarYawFusion(Node):
             t.transform.translation.z = 0.0
             
             # Set rotation using quaternion from yaw (only Z rotation for 2D navigation)
-            t.transform.rotation.x = 0.0
-            t.transform.rotation.y = 0.0
-            t.transform.rotation.z = math.sin(tf_yaw / 2.0)
-            t.transform.rotation.w = math.cos(tf_yaw / 2.0)
+            t.transform.rotation.x = q[0]
+            t.transform.rotation.y = q[1]
+            t.transform.rotation.z = q[2]
+            t.transform.rotation.w = q[3]
             
             # Publish the transform
             try:

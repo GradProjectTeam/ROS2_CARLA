@@ -32,37 +32,69 @@ class LidarRealtimeMapper(Node):
         self.frames_processed = 0
         self.total_points_processed = 0
         
-        # Declare parameters
-        self.declare_parameter('map_resolution', 0.1)       # Higher resolution for real-time map
-        self.declare_parameter('map_width', 400)            # Smaller area for real-time map
-        self.declare_parameter('map_height', 400)           # Smaller area for real-time map
-        self.declare_parameter('map_width_meters', 40.0)    # 40m x 40m area around vehicle
-        self.declare_parameter('map_height_meters', 40.0)   # 40m x 40m area around vehicle
-        self.declare_parameter('map_origin_x', -20.0)       # Centered on vehicle
-        self.declare_parameter('map_origin_y', -20.0)       # Centered on vehicle
-        self.declare_parameter('publish_rate', 10.0)        # Higher rate for real-time (10Hz)
-        self.declare_parameter('process_rate', 20.0)        # Higher rate for processing (20Hz)
-        self.declare_parameter('ground_threshold', 0.2)     # Lower to catch more obstacles
-        self.declare_parameter('max_points_to_process', 5000) # Process more points for detail
-        self.declare_parameter('min_height', -0.3)          # Capture lower obstacles
-        self.declare_parameter('max_height', 2.0)           # Lower ceiling to focus on obstacles
-        self.declare_parameter('raycast_skip', 2)           # Process more points for detail
-        self.declare_parameter('decay_rate', 0.2)           # Rate at which old data decays from map
-        self.declare_parameter('center_on_vehicle', True)   # Keep map centered on vehicle
-        self.declare_parameter('update_threshold', 0.01)    # Very low threshold for very quick updates
-        self.declare_parameter('use_cluster_data', True)    # Whether to use cluster data
-        self.declare_parameter('vehicle_frame_id', 'base_link') # Vehicle frame ID
-        self.declare_parameter('map_frame_id', 'map')       # Map frame ID
+        # Declare parameters with existence check
+        if not self.has_parameter('use_sim_time'):
+            self.declare_parameter('use_sim_time', False)
+        if not self.has_parameter('map_resolution'):
+            self.declare_parameter('map_resolution', 0.1)       # Higher resolution for real-time map
+        if not self.has_parameter('map_width'):
+            self.declare_parameter('map_width', 400)            # Smaller area for real-time map
+        if not self.has_parameter('map_height'):
+            self.declare_parameter('map_height', 400)           # Smaller area for real-time map
+        if not self.has_parameter('map_width_meters'):
+            self.declare_parameter('map_width_meters', 40.0)    # 40m x 40m area around vehicle
+        if not self.has_parameter('map_height_meters'):
+            self.declare_parameter('map_height_meters', 40.0)   # 40m x 40m area around vehicle
+        if not self.has_parameter('map_origin_x'):
+            self.declare_parameter('map_origin_x', -20.0)       # Centered on vehicle
+        if not self.has_parameter('map_origin_y'):
+            self.declare_parameter('map_origin_y', -20.0)       # Centered on vehicle
+        if not self.has_parameter('publish_rate'):
+            self.declare_parameter('publish_rate', 10.0)        # Higher rate for real-time (10Hz)
+        if not self.has_parameter('process_rate'):
+            self.declare_parameter('process_rate', 20.0)        # Higher rate for processing (20Hz)
+        if not self.has_parameter('ground_threshold'):
+            self.declare_parameter('ground_threshold', 0.2)     # Lower to catch more obstacles
+        if not self.has_parameter('max_points_to_process'):
+            self.declare_parameter('max_points_to_process', 5000) # Process more points for detail
+        if not self.has_parameter('min_height'):
+            self.declare_parameter('min_height', -0.3)          # Capture lower obstacles
+        if not self.has_parameter('max_height'):
+            self.declare_parameter('max_height', 2.0)           # Lower ceiling to focus on obstacles
+        if not self.has_parameter('raycast_skip'):
+            self.declare_parameter('raycast_skip', 2)           # Process more points for detail
+        if not self.has_parameter('decay_rate'):
+            self.declare_parameter('decay_rate', 0.2)           # Rate at which old data decays from map
+        if not self.has_parameter('center_on_vehicle'):
+            self.declare_parameter('center_on_vehicle', True)   # Keep map centered on vehicle
+        if not self.has_parameter('update_threshold'):
+            self.declare_parameter('update_threshold', 0.01)    # Very low threshold for very quick updates
+        if not self.has_parameter('use_cluster_data'):
+            self.declare_parameter('use_cluster_data', True)    # Whether to use cluster data
+        if not self.has_parameter('vehicle_frame_id'):
+            self.declare_parameter('vehicle_frame_id', 'base_link') # Vehicle frame ID
+        if not self.has_parameter('map_frame_id'):
+            self.declare_parameter('map_frame_id', 'map')       # Map frame ID
         
         # New parameters for all-white map
-        self.declare_parameter('initialize_as_free', True)  # Initialize all cells as free space
-        self.declare_parameter('unknown_to_free', True)     # Treat unknown cells as free space
+        if not self.has_parameter('initialize_as_free'):
+            self.declare_parameter('initialize_as_free', True)  # Initialize all cells as free space
+        if not self.has_parameter('unknown_to_free'):
+            self.declare_parameter('unknown_to_free', True)     # Treat unknown cells as free space
         
         # Bayesian update weights - more decisive for real-time
-        self.declare_parameter('hit_weight', 0.95)          # Very confident about hits
-        self.declare_parameter('miss_weight', 0.05)         # Confident about free space
-        self.declare_parameter('prior_weight', 0.5)         # Start with unknown
-        self.declare_parameter('count_threshold', 1.0)      # Lower threshold to mark cells faster
+        if not self.has_parameter('hit_weight'):
+            self.declare_parameter('hit_weight', 0.95)          # Very confident about hits
+        if not self.has_parameter('miss_weight'):
+            self.declare_parameter('miss_weight', 0.05)         # Confident about free space
+        if not self.has_parameter('prior_weight'):
+            self.declare_parameter('prior_weight', 0.5)         # Start with unknown
+        if not self.has_parameter('count_threshold'):
+            self.declare_parameter('count_threshold', 1.0)      # Lower threshold to mark cells faster
+        
+        # Add parameter for obstacle threshold
+        if not self.has_parameter('obstacle_threshold'):
+            self.declare_parameter('obstacle_threshold', 70)    # Threshold for marking cells as obstacles
         
         # Get parameters
         self.map_resolution = self.get_parameter('map_resolution').value
@@ -95,6 +127,9 @@ class LidarRealtimeMapper(Node):
         self.miss_weight = self.get_parameter('miss_weight').value
         self.prior_weight = self.get_parameter('prior_weight').value
         self.count_threshold = self.get_parameter('count_threshold').value
+        
+        # Get obstacle threshold parameter
+        self.obstacle_threshold = self.get_parameter('obstacle_threshold').value
         
         # Validate and adjust map dimensions
         if self.map_width_meters > 0 and self.map_height_meters > 0:
@@ -244,19 +279,50 @@ class LidarRealtimeMapper(Node):
             # Calculate the time difference for each cell
             time_diff = current_time - self.last_update_time
             
-            # Apply decay only to cells with a time difference
-            # Only decay cells that are obstacles (100), since free space (0) is our default
-            mask = (time_diff > 0) & (self.realtime_map == 100)
+            # Apply decay to cells that haven't been updated recently
+            # Only apply to cells that have some occupancy value (> 0)
+            mask = (time_diff > 0) & (self.realtime_map > 0)
             
             if np.any(mask):
-                # For binary map, if enough time has passed, convert obstacles back to free space
-                clear_mask = (time_diff[mask] > self.decay_rate)
+                # Get indices of cells to decay
                 indices = np.where(mask)
                 
-                # Clear obstacles that have exceeded decay time
+                # Process each cell that needs decay
                 for i in range(len(indices[0])):
                     idx_y, idx_x = indices[0][i], indices[1][i]
-                    if clear_mask[i]:
+                    
+                    # Calculate decay factor based on elapsed time
+                    # More time = more decay
+                    cell_time_diff = time_diff[idx_y, idx_x]
+                    
+                    # Skip cells that were just updated
+                    if cell_time_diff < 0.1:  # 100ms threshold
+                        continue
+                    
+                    # Calculate decay amount based on time difference and decay rate
+                    # decay_amount ranges from 0 to 1.0 based on elapsed time
+                    decay_amount = min(cell_time_diff * self.decay_rate, 1.0)
+                    
+                    # Apply decay to hit count
+                    if self.hit_count_map[idx_y, idx_x] > 0:
+                        # Gradually reduce hit count based on decay amount
+                        self.hit_count_map[idx_y, idx_x] *= (1.0 - decay_amount)
+                        
+                        # If hit count falls below threshold, update the map value
+                        if self.hit_count_map[idx_y, idx_x] < self.count_threshold:
+                            # Calculate new occupancy value based on hit count
+                            new_value = int((self.hit_count_map[idx_y, idx_x] / self.count_threshold) * 100)
+                            
+                            # Ensure value is within valid range
+                            new_value = max(0, min(new_value, 100))
+                            
+                            # Update map if value changed
+                            if self.realtime_map[idx_y, idx_x] != new_value:
+                                self.realtime_map[idx_y, idx_x] = new_value
+                                self.map_changed = True
+                    
+                    # If decay is strong enough, clear the cell completely
+                    if decay_amount > 0.8:  # 80% decay threshold for complete clearing
                         self.realtime_map[idx_y, idx_x] = 0
                         self.hit_count_map[idx_y, idx_x] = 0
                         self.map_changed = True
@@ -330,11 +396,20 @@ class LidarRealtimeMapper(Node):
                 # If no vehicle position, use (0,0)
                 vehicle_x, vehicle_y = 0, 0
             
-            # Process points with raycasting
-            for i, point in enumerate(pc_data):
-                if i % self.raycast_skip != 0:
-                    continue
-                
+            # Convert vehicle position to map coordinates
+            vehicle_map_x = int((vehicle_x - self.map_origin_x) / self.map_resolution)
+            vehicle_map_y = int((vehicle_y - self.map_origin_y) / self.map_resolution)
+            
+            # Check if vehicle position is in map bounds
+            if not (0 <= vehicle_map_x < self.map_width and 0 <= vehicle_map_y < self.map_height):
+                self.get_logger().warn("Vehicle position outside map bounds")
+                return
+            
+            # Group points by grid cell to handle multiple points in same cell
+            grid_cell_points = {}
+            
+            # Process points and group by grid cell
+            for point in pc_data:
                 x, y, z = point
                 
                 # Filter out points by height
@@ -345,23 +420,39 @@ class LidarRealtimeMapper(Node):
                 map_x = int((x - self.map_origin_x) / self.map_resolution)
                 map_y = int((y - self.map_origin_y) / self.map_resolution)
                 
-                # Check if point is within map bounds
-                if 0 <= map_x < self.map_width and 0 <= map_y < self.map_height:
-                    # Convert vehicle position to map coordinates
-                    vehicle_map_x = int((vehicle_x - self.map_origin_x) / self.map_resolution)
-                    vehicle_map_y = int((vehicle_y - self.map_origin_y) / self.map_resolution)
-                    
-                    # Only include if vehicle position is in map bounds
-                    if 0 <= vehicle_map_x < self.map_width and 0 <= vehicle_map_y < self.map_height:
-                        # Perform raycasting from vehicle to point
-                        ray_cells = self.bresenham_line(vehicle_map_y, vehicle_map_x, map_y, map_x)
-                        
-                        # Mark ray cells as free space (except the endpoint)
-                        for cell_y, cell_x in ray_cells[:-1]:
-                            cells_to_update.append((cell_y, cell_x, False))  # False = free space
-                        
-                        # Mark endpoint as occupied
-                        cells_to_update.append((map_y, map_x, True))  # True = occupied
+                # Skip if outside map bounds
+                if not (0 <= map_x < self.map_width and 0 <= map_y < self.map_height):
+                    continue
+                
+                # Add point to grid cell
+                cell_key = (map_y, map_x)
+                if cell_key not in grid_cell_points:
+                    grid_cell_points[cell_key] = []
+                
+                grid_cell_points[cell_key].append((x, y, z))
+            
+            # Process each occupied grid cell
+            for cell_key, points in grid_cell_points.items():
+                map_y, map_x = cell_key
+                
+                # Calculate average height and number of points in cell
+                avg_z = sum(p[2] for p in points) / len(points)
+                num_points = len(points)
+                
+                # Perform raycasting from vehicle to this cell
+                ray_cells = self.bresenham_line(vehicle_map_y, vehicle_map_x, map_y, map_x)
+                
+                # Mark ray cells as free space (except the endpoint)
+                for cell_y, cell_x in ray_cells[:-1]:
+                    cells_to_update.append((cell_y, cell_x, False))  # False = free space
+                
+                # Mark endpoint as occupied with weight based on number of points
+                # More points in a cell = more likely to be an obstacle
+                confidence = min(1.0, num_points / 5.0)  # Scale confidence by number of points (max 1.0)
+                
+                # Cells with more points get higher confidence
+                for _ in range(max(1, int(confidence * 3))):
+                    cells_to_update.append((map_y, map_x, True))  # True = occupied
             
             # Apply updates to the map
             self.update_cells(cells_to_update)
@@ -371,6 +462,8 @@ class LidarRealtimeMapper(Node):
             
         except Exception as e:
             self.get_logger().error(f"Error updating map from points: {str(e)}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
     
     def update_from_markers(self, markers_msg, vehicle_position):
         """Update the map using cluster center markers"""
@@ -505,13 +598,25 @@ class LidarRealtimeMapper(Node):
                 current_count = self.hit_count_map[y, x]
                 
                 if is_occupied:
-                    # Cell is occupied - for binary map, make it 100 (black)
-                    new_value = 100
+                    # Cell is occupied - increase the hit count
                     new_count = current_count + 1.0
+                    
+                    # Mark as obstacle if count exceeds threshold
+                    if new_count >= self.count_threshold:
+                        new_value = 100  # Maximum occupancy
+                    else:
+                        # Scale the occupancy value based on hit count
+                        new_value = min(int((new_count / self.count_threshold) * 100), 100)
                 else:
-                    # Cell is free - for binary map, make it 0 (white)
-                    new_value = 0
+                    # Cell is free - decrease the hit count
                     new_count = max(current_count - 0.3, 0.0)
+                    
+                    # If count is below threshold, mark as free
+                    if new_count < self.count_threshold * 0.5:
+                        new_value = 0
+                    else:
+                        # Scale down the occupancy value
+                        new_value = max(int((new_count / self.count_threshold) * 100), 0)
                 
                 # Update maps only if value changed
                 if current_value != new_value:
@@ -568,6 +673,12 @@ class LidarRealtimeMapper(Node):
             # Create a copy of the map data
             map_data = self.realtime_map.copy()
             
+            # Apply obstacle threshold to create binary representation
+            # Values >= obstacle_threshold become 100 (obstacle)
+            # Values < obstacle_threshold become 0 (free space)
+            map_data[map_data >= self.obstacle_threshold] = 100
+            map_data[map_data < self.obstacle_threshold] = 0
+            
             # Convert unknown cells (-1 or 50) to free space (0) if unknown_to_free is True
             if self.unknown_to_free:
                 map_data[map_data == 50] = 0
@@ -591,7 +702,44 @@ class LidarRealtimeMapper(Node):
             fps = self.frames_processed / elapsed
             pps = self.total_points_processed / elapsed
             
+            # Calculate map statistics
+            with self.map_lock:
+                # Count cells by type
+                free_cells = np.sum(self.realtime_map == 0)
+                obstacle_cells = np.sum(self.realtime_map >= self.obstacle_threshold)
+                unknown_cells = np.sum((self.realtime_map > 0) & (self.realtime_map < self.obstacle_threshold))
+                
+                # Calculate percentages
+                total_cells = self.map_width * self.map_height
+                free_percent = (free_cells / total_cells) * 100
+                obstacle_percent = (obstacle_cells / total_cells) * 100
+                unknown_percent = (unknown_cells / total_cells) * 100
+                
+                # Calculate average hit count for occupied cells
+                occupied_mask = self.realtime_map > 0
+                avg_hit_count = 0.0
+                if np.any(occupied_mask):
+                    avg_hit_count = np.mean(self.hit_count_map[occupied_mask])
+            
+            # Log performance statistics
             self.get_logger().info(f"Performance: {fps:.2f} fps, {pps:.2f} points/sec")
+            
+            # Log map statistics
+            self.get_logger().info(f"Map stats: {free_cells} free ({free_percent:.1f}%), "
+                                 f"{obstacle_cells} obstacles ({obstacle_percent:.1f}%), "
+                                 f"{unknown_cells} uncertain ({unknown_percent:.1f}%)")
+            
+            # Log hit count statistics
+            self.get_logger().info(f"Avg hit count: {avg_hit_count:.2f}, "
+                                 f"Threshold: {self.count_threshold}, "
+                                 f"Obstacle threshold: {self.obstacle_threshold}")
+            
+            # Log memory usage
+            import psutil
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            memory_mb = memory_info.rss / (1024 * 1024)
+            self.get_logger().info(f"Memory usage: {memory_mb:.1f} MB")
             
             # Reset counters for next report
             self.start_time = time.time()
