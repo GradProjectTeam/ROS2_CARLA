@@ -7,6 +7,7 @@ from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped, Twist, Point
 from visualization_msgs.msg import Marker
 from tf2_ros import TransformListener, Buffer, TransformException
+
 from carla_msgs.msg import CarlaEgoVehicleControl  # Import CARLA control message type
 import math
 import numpy as np
@@ -21,6 +22,7 @@ class RobotControllerNode(Node):
             self.declare_parameter('use_sim_time', False)
             
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
+
         self.declare_parameter('carla_control_topic', '/carla/ego_vehicle/vehicle_control_cmd')  # CARLA control topic
         self.declare_parameter('local_path_topic', '/local_path')
         self.declare_parameter('map_frame_id', 'map')
@@ -38,6 +40,7 @@ class RobotControllerNode(Node):
         self.declare_parameter('pid_i_gain', 0.1)
         self.declare_parameter('pid_d_gain', 0.1)
         
+
         # CARLA specific parameters
         self.declare_parameter('enable_carla_control', True)  # Enable CARLA control
         self.declare_parameter('max_throttle', 1.0)  # Maximum throttle value (0-1)
@@ -67,6 +70,7 @@ class RobotControllerNode(Node):
         self.pid_i_gain = self.get_parameter('pid_i_gain').get_parameter_value().double_value
         self.pid_d_gain = self.get_parameter('pid_d_gain').get_parameter_value().double_value
         
+
         # Get CARLA specific parameters
         self.enable_carla_control = self.get_parameter('enable_carla_control').get_parameter_value().bool_value
         self.max_throttle = self.get_parameter('max_throttle').get_parameter_value().double_value
@@ -110,6 +114,7 @@ class RobotControllerNode(Node):
             qos_profile
         )
         
+
         # Create CARLA control publisher
         self.carla_control_pub = self.create_publisher(
             CarlaEgoVehicleControl,
@@ -135,6 +140,7 @@ class RobotControllerNode(Node):
         )
         
         self.get_logger().info('Robot controller node initialized')
+
         if self.enable_carla_control:
             self.get_logger().info(f'CARLA control enabled, publishing to {self.carla_control_topic}')
     
@@ -150,6 +156,7 @@ class RobotControllerNode(Node):
             # No path to follow, stop the robot
             cmd_vel = Twist()
             self.cmd_vel_pub.publish(cmd_vel)
+
             
             # Also stop CARLA vehicle if enabled
             if self.enable_carla_control:
@@ -193,6 +200,7 @@ class RobotControllerNode(Node):
                 # Stop the robot
                 cmd_vel = Twist()
                 self.cmd_vel_pub.publish(cmd_vel)
+
                 
                 # Also stop CARLA vehicle if enabled
                 if self.enable_carla_control:
@@ -212,6 +220,7 @@ class RobotControllerNode(Node):
             
             # Publish velocity commands
             self.cmd_vel_pub.publish(cmd_vel)
+
             
             # Convert and publish CARLA control if enabled
             if self.enable_carla_control:
@@ -225,6 +234,7 @@ class RobotControllerNode(Node):
         except Exception as e:
             self.get_logger().error(f'Error in robot control: {str(e)}')
     
+
     def convert_to_carla_control(self, cmd_vel):
         """Convert ROS Twist message to CARLA control message"""
         carla_control = CarlaEgoVehicleControl()

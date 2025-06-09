@@ -15,6 +15,7 @@ def generate_launch_description():
     # Include the base sensor fusion launch file
     # This provides all the sensor fusion capabilities
     base_launch = IncludeLaunchDescription(
+
         PythonLaunchDescriptionSource([os.path.join(pkg_dir, 'launch', 'fast_imu_lidar_fusion_lidar_only.launch.py')]),
         launch_arguments={
             'use_sim_time': LaunchConfiguration('use_sim_time'),
@@ -22,6 +23,7 @@ def generate_launch_description():
             'lidar_tcp_port': LaunchConfiguration('lidar_tcp_port'),
             'imu_tcp_ip': LaunchConfiguration('imu_tcp_ip'),
             'imu_tcp_port': LaunchConfiguration('imu_tcp_port'),
+
             'map_resolution': LaunchConfiguration('map_resolution'),  # Pass map resolution
             'vehicle_length': LaunchConfiguration('vehicle_length'),  # Pass vehicle dimensions
             'vehicle_width': LaunchConfiguration('vehicle_width'),
@@ -45,12 +47,14 @@ def generate_launch_description():
             'map_frame_id': 'map',
             'base_frame_id': 'base_link',
             'planning_frequency': 1.0,  # Plan once per second
+
             'obstacle_inflation_radius': 1.5,  # Increased from 0.5 to 1.5 for larger cells
             'path_resolution': 0.1,  # Resolution of the path in meters
             'heuristic_weight': 1.0,  # Weight for A* heuristic
             'enable_visualization': True,
             'visualize_search': True,  # Visualize the search process
             'visualize_heatmap': True,  # Visualize cost heatmap
+
             'obstacle_threshold': LaunchConfiguration('obstacle_threshold'),  # Use the same threshold as the mapper
         }],
         output='screen'
@@ -79,6 +83,7 @@ def generate_launch_description():
             'goal_attraction_weight': 0.4,  # Weight for goal attraction
             'lookahead_distance': 1.0,  # Distance to look ahead on the path
             'enable_visualization': True,
+
             'obstacle_threshold': LaunchConfiguration('obstacle_threshold'),  # Use the same threshold as the mapper
         }],
         output='screen'
@@ -119,6 +124,7 @@ def generate_launch_description():
             'obstacle_cost_gain': 1.0,
             'path_following_gain': 1.0,
             'lookahead_distance': 3.0,
+
         }],
         output='screen'
     )
@@ -131,6 +137,7 @@ def generate_launch_description():
         parameters=[{
             'use_sim_time': LaunchConfiguration('use_sim_time'),
             'global_path_topic': '/global_path',
+
             'local_path_topic': '/dwa_local_path',  # Use DWA's local path
             'map_frame_id': 'map',
             'global_path_color_r': 0.0,
@@ -166,7 +173,7 @@ def generate_launch_description():
         output='screen'
     )
     
-    # Robot Controller Node - Controls the robot based on the local path
+
     # robot_controller_node = Node(
     #     package='sensor_fusion',
     #     executable='robot_controller_node',
@@ -240,7 +247,7 @@ def generate_launch_description():
             default_value='false',
             description='Whether to use simulation time'
         ),
-        
+
         # Map parameters
         DeclareLaunchArgument(
             'map_resolution',
@@ -286,6 +293,7 @@ def generate_launch_description():
         # Launch motion planning nodes
         global_planner_node,
         local_planner_node,
+
         dwa_planner_node,  # Add DWA planner node
         path_visualization_node,
         goal_publisher_node,

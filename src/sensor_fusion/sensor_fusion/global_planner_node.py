@@ -211,6 +211,7 @@ class GlobalPlannerNode(Node):
             return False
         
         idx = y * self.map_width + x
+
         # Use a lower threshold (70 instead of 90) to be more conservative about obstacles
         # This will treat more cells as obstacles, making paths avoid gray areas
         return self.map_data.data[idx] < 70
