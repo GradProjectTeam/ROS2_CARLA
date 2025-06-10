@@ -42,6 +42,9 @@ setup(
             'imu_listener = sensor_fusion.imu_listener:main',
             'imu_euler_visualizer = sensor_fusion.imu_euler_visualizer:main',
             'imu_lidar_yaw_fusion = sensor_fusion.imu_lidar_yaw_fusion:main',
+            'imu_camera_lane_fusion = sensor_fusion.imu_camera_lane_fusion:main',
+            'heading_visualization_node = sensor_fusion.heading_visualization_node:main',
+            'lane_to_map_mapper = sensor_fusion.lane_to_map_mapper:main',
 
             'mpc_planner = sensor_fusion.mpc_planner:main',
             'hybrid_astar_planner = sensor_fusion.hybrid_astar_planner:main',
@@ -65,8 +68,9 @@ setup(
             'mpc_trajectory_controller = sensor_fusion.mpc_trajectory_controller:main',
             'mpc_controller = sensor_fusion.mpc_controller:main',
             'obstacle_visualizer = sensor_fusion.obstacle_visualizer:main',
-            'enhanced_camera_processor = sensor_fusion.enhanced_camera_processor_node:main',
-            'camera_processor = sensor_fusion.camera_processor:main',
+            # 'enhanced_camera_processor = sensor_fusion.enhanced_camera_processor_node:main',
+            # 'camera_processor = sensor_fusion.camera_processor:main',
+            'camera_processor_node = sensor_fusion.camera_processor_node:main',
             'dwa_planner_node = sensor_fusion.dwa_planner_node:main',
             'autonomous_dwa_node = sensor_fusion.autonomous_dwa_node:main',
             
