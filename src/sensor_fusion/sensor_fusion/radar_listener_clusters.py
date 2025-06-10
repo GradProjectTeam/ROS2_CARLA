@@ -15,6 +15,15 @@ from tf2_ros import TransformBroadcaster
 from std_msgs.msg import ColorRGBA
 import math
 from nav_msgs.msg import OccupancyGrid
+import re
+from std_msgs.msg import Float32MultiArray
+
+# CARLA Radar Configuration
+CARLA_RADAR_HORIZONTAL_FOV = 60.0  # degrees
+CARLA_RADAR_VERTICAL_FOV = 20.0    # degrees
+CARLA_RADAR_RANGE = 100.0          # meters
+CARLA_RADAR_POINTS_PER_SECOND = 2000
+CARLA_RADAR_POSITION = [1.5, 0.5, 0.0]  # x, y, z relative to vehicle
 
 
 class RadarClient_clusters(Node):
@@ -29,6 +38,17 @@ class RadarClient_clusters(Node):
         self.grid_publisher = self.create_publisher(OccupancyGrid, '/radar/occupancy_grid', 10)
         self.debug_publisher = self.create_publisher(std_msgs.msg.String, '/radar/debug', 10)
         self.monitor_publisher = self.create_publisher(std_msgs.msg.String, '/radar/monitor_info', 10)
+        self.distance_publisher = self.create_publisher(std_msgs.msg.String, '/radar/distance_info', 10)
+        self.raw_distance_publisher = self.create_publisher(Float32MultiArray, '/radar/raw_distance_info', 10)
+        
+        # TCP-specific publishers (for separating TCP data visualization)
+        self.tcp_points_publisher = self.create_publisher(PointCloud2, '/radar/tcp/points', 10)
+        self.tcp_markers_publisher = self.create_publisher(MarkerArray, '/radar/tcp/markers', 10)
+        self.tcp_velocity_publisher = self.create_publisher(MarkerArray, '/radar/tcp/velocity_vectors', 10)
+        
+        # CARLA-specific publishers
+        self.carla_radar_points_publisher = self.create_publisher(PointCloud2, '/carla/radar/points', 10)
+        self.carla_radar_markers_publisher = self.create_publisher(MarkerArray, '/carla/radar/markers', 10)
         
         # TCP Client setup
         self.tcp_ip = '127.0.0.1'
@@ -51,6 +71,10 @@ class RadarClient_clusters(Node):
         self.connection_time = time.time()
         self.processing_times = []  # Track processing times for performance monitoring
         
+        # Data storage for TCP points (separate from CARLA data)
+        self.tcp_points_data = []
+        self.max_tcp_points = 1000
+        
         # Visualization parameters
         self.use_advanced_coloring = True
         self.show_velocity_vectors = True
@@ -62,6 +86,20 @@ class RadarClient_clusters(Node):
         # Data processing parameters
         self.velocity_threshold = 0.5  # m/s - minimum velocity to consider an object moving
         self.cluster_history = {}  # Track clusters over time for velocity estimation
+        self.recent_measurements = []  # Track recent measurements for distance summary
+        self.max_recent_measurements = 20  # Maximum number of recent measurements to store
+        
+        # CARLA radar specific parameters
+        self.carla_radar_data = []  # Store CARLA radar detections
+        self.max_carla_points = 1000  # Maximum number of CARLA radar points to store
+        
+        # Subscribe to CARLA radar topic if available
+        self.carla_radar_subscription = self.create_subscription(
+            Float32MultiArray,
+            '/carla/radar/raw',
+            self.carla_radar_callback,
+            10
+        )
         
         # Connect to server
         self.get_logger().info(f'[RADAR] Attempting to connect to {self.tcp_ip}:{self.tcp_port}...')
@@ -82,7 +120,143 @@ class RadarClient_clusters(Node):
         # Create timer for stats reporting
         self.stats_timer = self.create_timer(5.0, self.report_stats)  # Report stats every 5 seconds
         
+        # Create timer for publishing CARLA radar data
+        self.carla_radar_timer = self.create_timer(0.1, self.publish_carla_radar_data)  # 10Hz
+        
+        # Create timer for publishing TCP-only radar visualization
+        self.tcp_visualization_timer = self.create_timer(0.05, self.publish_tcp_radar_visualization)  # 20Hz
+        
         self.get_logger().info('[RADAR] Radar processing node initialized successfully')
+
+    def store_tcp_point(self, x, y, z, velocity):
+        """Store a point received from TCP for separate visualization"""
+        point_data = {
+            'x': x,
+            'y': y,
+            'z': z,
+            'velocity': velocity,
+            'timestamp': self.get_clock().now().to_msg()
+        }
+        
+        # Add to TCP points data
+        self.tcp_points_data.append(point_data)
+        
+        # Limit the number of stored points
+        if len(self.tcp_points_data) > self.max_tcp_points:
+            self.tcp_points_data.pop(0)
+    
+    def publish_tcp_radar_visualization(self):
+        """Publish visualization of TCP-only radar data"""
+        if not self.tcp_points_data:
+            return
+            
+        try:
+            # Create point cloud from TCP radar data
+            points = []
+            for point in self.tcp_points_data:
+                points.append((
+                    point['x'],
+                    point['y'], 
+                    point['z'], 
+                    point['velocity']
+                ))
+                
+            # Create and publish point cloud
+            pc2_msg = self.create_point_cloud2(points, frame_id="radar_link")
+            self.tcp_points_publisher.publish(pc2_msg)
+            
+            # Create markers for visualization
+            marker_array = MarkerArray()
+            
+            # Create a single marker with all points
+            marker = Marker()
+            marker.header.frame_id = "radar_link"
+            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.ns = "tcp_radar_points"
+            marker.id = 0
+            marker.type = Marker.POINTS
+            marker.action = Marker.ADD
+            marker.scale.x = 0.3  # Point size
+            marker.scale.y = 0.3
+            marker.lifetime.sec = 0  # Persistent
+            
+            # Add points with velocity-based coloring
+            for point in self.tcp_points_data:
+                p = geometry_msgs.msg.Point()
+                p.x = point['x']
+                p.y = point['y']
+                p.z = point['z']
+                marker.points.append(p)
+                
+                # Add color for each point based on velocity
+                color = ColorRGBA()
+                velocity = point['velocity']
+                
+                if abs(velocity) < self.velocity_threshold:
+                    # Stationary object - gray
+                    color.r = 0.7
+                    color.g = 0.7
+                    color.b = 0.7
+                elif velocity > 0:
+                    # Approaching (red to yellow based on speed)
+                    intensity = min(1.0, velocity / 10.0)
+                    color.r = 1.0
+                    color.g = 1.0 - intensity
+                    color.b = 0.0
+                else:
+                    # Moving away (blue to cyan based on speed)
+                    intensity = min(1.0, abs(velocity) / 10.0)
+                    color.r = 0.0
+                    color.g = intensity
+                    color.b = 1.0
+                    
+                color.a = 1.0
+                marker.colors.append(color)
+                
+            marker_array.markers.append(marker)
+            
+            # Add distance rings for reference
+            for distance in [5.0, 10.0, 20.0, 50.0]:
+                ring_marker = self.create_distance_ring_marker(distance)
+                marker_array.markers.append(ring_marker)
+            
+            # Publish markers
+            self.tcp_markers_publisher.publish(marker_array)
+            
+            # Create velocity vectors
+            self.publish_tcp_velocity_vectors()
+            
+        except Exception as e:
+            self.get_logger().error(f'[TCP RADAR] Error publishing radar visualization: {str(e)}')
+            import traceback
+            traceback.print_exc()
+    
+    def publish_tcp_velocity_vectors(self):
+        """Publish velocity vectors for TCP radar data"""
+        if not self.tcp_points_data:
+            return
+            
+        velocity_array = MarkerArray()
+        current_time = self.get_clock().now().to_msg()
+        
+        # Only show vectors for points with significant velocity
+        velocity_points = [p for p in self.tcp_points_data if abs(p['velocity']) > self.velocity_threshold]
+        
+        # Limit to max 50 vectors to avoid clutter
+        if len(velocity_points) > 50:
+            # Sort by absolute velocity (show fastest ones)
+            velocity_points.sort(key=lambda p: abs(p['velocity']), reverse=True)
+            velocity_points = velocity_points[:50]
+        
+        for i, point in enumerate(velocity_points):
+            vel_vector = self.create_velocity_vector_marker(
+                point['x'], point['y'], point['z'], 
+                point['velocity'], i, current_time
+            )
+            velocity_array.markers.append(vel_vector)
+        
+        if velocity_array.markers:
+            self.tcp_velocity_publisher.publish(velocity_array)
 
     def report_stats(self):
         """Report statistics about received data"""
@@ -120,6 +294,262 @@ class RadarClient_clusters(Node):
                 return None
             data += packet
         return data
+
+    def radar_polar_to_distance(self, altitude, azimuth, depth, velocity):
+        """
+        Convert radar polar coordinates to distance measurements and Cartesian coordinates
+        
+        Args:
+            altitude (float): Elevation angle in degrees
+            azimuth (float): Azimuth angle in degrees
+            depth (float): Radial distance in meters
+            velocity (float): Radial velocity in m/s
+            
+        Returns:
+            tuple: (x, y, z, distance, horizontal_distance, velocity)
+        """
+        # Convert angles to radians
+        azimuth_rad = np.radians(azimuth)
+        altitude_rad = np.radians(altitude)
+        
+        # Calculate Cartesian coordinates
+        # For automotive radars, the convention is typically:
+        # x: forward (depth direction)
+        # y: left/right (lateral)
+        # z: up/down (altitude)
+        
+        # Convert spherical to Cartesian coordinates
+        x = depth * np.cos(altitude_rad) * np.cos(azimuth_rad)
+        y = depth * np.cos(altitude_rad) * np.sin(azimuth_rad)
+        z = depth * np.sin(altitude_rad)
+        
+        # Calculate horizontal distance (distance in xy-plane)
+        horizontal_distance = np.sqrt(x*x + y*y)
+        
+        # The direct line-of-sight distance is the same as depth
+        distance = depth
+        
+        # Adjust velocity sign if needed (positive = approaching, negative = moving away)
+        # Note: In radar systems, velocity is typically positive when target is moving away
+        # and negative when approaching, but we might want to flip it for intuitive visualization
+        # adjusted_velocity = -velocity  # Uncomment if you need to flip the velocity convention
+        
+        return (x, y, z, distance, horizontal_distance, velocity)
+        
+    def process_radar_parameters(self, altitude, azimuth, depth, velocity):
+        """
+        Process the 4 raw radar parameters (Altitude, Azimuth, Depth, Velocity) and 
+        calculate distance metrics from them.
+        
+        Args:
+            altitude (float): Elevation angle in degrees
+            azimuth (float): Azimuth angle in degrees
+            depth (float): Radial distance in meters
+            velocity (float): Radial velocity in m/s
+            
+        Returns:
+            dict: Dictionary containing all calculated distance metrics and raw parameters
+        """
+        # Calculate Cartesian coordinates and distance metrics
+        x, y, z, distance, horizontal_distance, velocity = self.radar_polar_to_distance(
+            altitude, azimuth, depth, velocity)
+        
+        # Compute additional metrics
+        angle_to_target = np.degrees(np.arctan2(y, x))  # Angle in degrees in the XY plane
+        
+        # Time to collision (if approaching, otherwise infinity)
+        if velocity < 0:  # Object is approaching (negative velocity)
+            time_to_collision = abs(distance / velocity)
+        else:
+            time_to_collision = float('inf')
+        
+        # Calculate distance metrics - will add more as needed
+        distance_metrics = {
+            # Raw parameters
+            'altitude': altitude,             # degrees
+            'azimuth': azimuth,               # degrees
+            'depth': depth,                   # meters (raw radar distance)
+            'velocity': velocity,             # m/s
+            
+            # Calculated coordinates
+            'x': x,                           # meters (forward distance)
+            'y': y,                           # meters (lateral distance)
+            'z': z,                           # meters (height)
+            
+            # Derived distance metrics
+            'direct_distance': distance,                  # meters (straight line)
+            'horizontal_distance': horizontal_distance,   # meters (ground plane)
+            'angle_to_target': angle_to_target,           # degrees
+            'time_to_collision': time_to_collision,       # seconds
+            
+            # Additional useful metrics
+            'forward_distance': x,            # meters (forward distance - same as x)
+            'lateral_distance': y,            # meters (left/right distance - same as y)
+            'vertical_distance': z,           # meters (up/down distance - same as z)
+            'is_approaching': velocity < 0,   # Boolean (true if object is approaching)
+        }
+        
+        # Log this processing for debugging
+        debug_msg = std_msgs.msg.String()
+        debug_msg.data = (
+            f"[RADAR DISTANCE METRICS]\n"
+            f"  Raw Parameters:\n"
+            f"    Altitude: {altitude:.4f}°, Azimuth: {azimuth:.4f}°, Depth: {depth:.4f}m, Velocity: {velocity:.4f}m/s\n"
+            f"  Distance Metrics:\n"
+            f"    Direct Distance: {distance:.4f}m\n"
+            f"    Horizontal Distance: {horizontal_distance:.4f}m\n"
+            f"    Forward Distance (X): {x:.4f}m\n"
+            f"    Lateral Distance (Y): {y:.4f}m\n"
+            f"    Vertical Distance (Z): {z:.4f}m\n"
+            f"  Motion Analysis:\n"
+            f"    Angle to Target: {angle_to_target:.2f}°\n"
+            f"    {'Approaching' if velocity < 0 else 'Moving Away'} at {abs(velocity):.2f}m/s\n"
+            f"    {'Time to Collision: ' + f'{time_to_collision:.2f}s' if velocity < 0 else 'No collision risk'}"
+        )
+        self.debug_publisher.publish(debug_msg)
+        
+        return distance_metrics
+        
+    def radar_parameters_to_point_cloud(self, altitude, azimuth, depth, velocity):
+        """
+        Convert a single radar measurement (altitude, azimuth, depth, velocity) to a PointCloud2 message
+        
+        Args:
+            altitude (float): Elevation angle in degrees
+            azimuth (float): Azimuth angle in degrees
+            depth (float): Radial distance in meters
+            velocity (float): Radial velocity in m/s
+            
+        Returns:
+            sensor_msgs.msg.PointCloud2: PointCloud2 message with a single point
+        """
+        # Convert to Cartesian coordinates
+        x, y, z, distance, horizontal_distance, velocity = self.radar_polar_to_distance(
+            altitude, azimuth, depth, velocity)
+        
+        # Create a PointCloud2 message with a single point
+        pc2 = PointCloud2()
+        pc2.header.stamp = self.get_clock().now().to_msg()
+        pc2.header.frame_id = "radar_link"
+        
+        # Define the fields
+        fields = [
+            PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+            PointField(name='velocity', offset=12, datatype=PointField.FLOAT32, count=1),
+            PointField(name='distance', offset=16, datatype=PointField.FLOAT32, count=1),
+            PointField(name='azimuth', offset=20, datatype=PointField.FLOAT32, count=1),
+            PointField(name='altitude', offset=24, datatype=PointField.FLOAT32, count=1)
+        ]
+        
+        # Set the fields in the message
+        pc2.fields = fields
+        pc2.is_bigendian = False
+        pc2.point_step = 28  # 7 fields * 4 bytes
+        pc2.row_step = pc2.point_step
+        
+        # Pack point data
+        point_data = np.array([x, y, z, velocity, depth, azimuth, altitude], dtype=np.float32)
+        pc2.data = point_data.tobytes()
+        
+        pc2.height = 1
+        pc2.width = 1
+        pc2.is_dense = True
+        
+        return pc2
+    
+    def multi_radar_parameters_to_point_cloud(self, params_list):
+        """
+        Convert multiple radar measurements to a single PointCloud2 message
+        
+        Args:
+            params_list (list): List of (altitude, azimuth, depth, velocity) tuples
+            
+        Returns:
+            sensor_msgs.msg.PointCloud2: PointCloud2 message with multiple points
+        """
+        if not params_list:
+            return None
+            
+        # Create a PointCloud2 message
+        pc2 = PointCloud2()
+        pc2.header.stamp = self.get_clock().now().to_msg()
+        pc2.header.frame_id = "radar_link"
+        
+        # Define the fields
+        fields = [
+            PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+            PointField(name='velocity', offset=12, datatype=PointField.FLOAT32, count=1),
+            PointField(name='distance', offset=16, datatype=PointField.FLOAT32, count=1),
+            PointField(name='azimuth', offset=20, datatype=PointField.FLOAT32, count=1),
+            PointField(name='altitude', offset=24, datatype=PointField.FLOAT32, count=1)
+        ]
+        
+        # Set the fields in the message
+        pc2.fields = fields
+        pc2.is_bigendian = False
+        pc2.point_step = 28  # 7 fields * 4 bytes
+        
+        # Process all points
+        all_points = []
+        for altitude, azimuth, depth, velocity in params_list:
+            # Convert to Cartesian coordinates
+            x, y, z, distance, horizontal_distance, velocity = self.radar_polar_to_distance(
+                altitude, azimuth, depth, velocity)
+                
+            # Add to point list
+            all_points.append([x, y, z, velocity, depth, azimuth, altitude])
+        
+        # Set data
+        points_array = np.array(all_points, dtype=np.float32).flatten()
+        pc2.data = points_array.tobytes()
+        
+        pc2.height = 1
+        pc2.width = len(all_points)
+        pc2.row_step = pc2.point_step * len(all_points)
+        pc2.is_dense = True
+        
+        return pc2
+        
+    def process_cpp_debug(self, msg):
+        """Process debug messages from C++ code containing radar measurements"""
+        try:
+            # Example debug format: 
+            # [CPP DEBUG] Processed: Altitude: 0.0000 meters, Azimuth: 0.1717 degrees, Depth: 48.5033 meters, Velocity: 0.0000 m/s
+            
+            pattern = r"Altitude:\s+(-?\d+\.\d+)\s+meters,\s+Azimuth:\s+(-?\d+\.\d+)\s+degrees,\s+Depth:\s+(-?\d+\.\d+)\s+meters,\s+Velocity:\s+(-?\d+\.\d+)\s+m/s"
+            match = re.search(pattern, msg.data)
+            
+            if match:
+                altitude = float(match.group(1))
+                azimuth = float(match.group(2))
+                depth = float(match.group(3))
+                velocity = float(match.group(4))
+                
+                # Process the 4 parameters directly
+                distance_metrics = self.process_radar_parameters(altitude, azimuth, depth, velocity)
+                
+                # Store the measurement
+                self.recent_measurements.append(distance_metrics)
+                
+                # Limit the number of stored measurements
+                if len(self.recent_measurements) > self.max_recent_measurements:
+                    self.recent_measurements.pop(0)
+                
+                # Convert to point cloud and publish
+                point_cloud = self.radar_parameters_to_point_cloud(altitude, azimuth, depth, velocity)
+                self.points_publisher.publish(point_cloud)
+                
+                # Publish distance information
+                self.publish_radar_distances()
+                
+        except Exception as e:
+            self.get_logger().error(f'[RADAR] Error processing debug message: {str(e)}')
+            import traceback
+            traceback.print_exc()
 
     def receive_data(self):
         try:
@@ -174,6 +604,12 @@ class RadarClient_clusters(Node):
                 
                 # Pre-calculate current time to avoid repeated calls
                 current_time = self.get_clock().now().to_msg()
+                
+                # Store distance data for reporting
+                min_distance = float('inf')
+                max_distance = 0
+                avg_distances = []
+                cluster_distances = []
 
                 for cluster_id in range(num_clusters):
                     if len(self.data_buffer) < offset + 4:
@@ -197,6 +633,8 @@ class RadarClient_clusters(Node):
                     # Process all points in the cluster at once
                     cluster_points = []
                     cluster_velocities = []
+                    cluster_min_distance = float('inf')
+                    cluster_total_distance = 0
                     
                     # Dictionary to track unique points (for duplicate detection)
                     unique_points = {}
@@ -207,10 +645,19 @@ class RadarClient_clusters(Node):
                         altitude, azimuth, depth, velocity = struct.unpack('!ffff', self.data_buffer[offset:offset + 16])
                         offset += 16  # Move to the next point
 
-                        # Convert polar coordinates to Cartesian coordinates
-                        x = depth * np.cos(np.radians(azimuth))
-                        y = depth * np.sin(np.radians(azimuth))
-                        z = altitude
+                        # Convert polar coordinates to distance and Cartesian coordinates
+                        x, y, z, distance, horizontal_distance, velocity = self.radar_polar_to_distance(
+                            altitude, azimuth, depth, velocity)
+                        
+                        # Store the point for TCP-only visualization
+                        self.store_tcp_point(x, y, z, velocity)
+                        
+                        # Update distance statistics
+                        min_distance = min(min_distance, distance)
+                        max_distance = max(max_distance, distance)
+                        avg_distances.append(distance)
+                        cluster_min_distance = min(cluster_min_distance, distance)
+                        cluster_total_distance += distance
                         
                         # Check for duplicates with a small tolerance
                         # Round to 2 decimal places for duplicate detection
@@ -253,13 +700,19 @@ class RadarClient_clusters(Node):
                         centroid_z = sum(p[2] for p in cluster_points) / len(cluster_points)
                         avg_velocity = sum(cluster_velocities) / len(cluster_velocities)
                         
+                        # Calculate cluster average distance
+                        avg_cluster_distance = cluster_total_distance / len(cluster_points)
+                        cluster_distances.append((cluster_id, cluster_min_distance, avg_cluster_distance, len(cluster_points)))
+                        
                         # Store cluster data for tracking
                         cluster_key = f"cluster_{cluster_id}"
                         self.cluster_history[cluster_key] = {
                             'centroid': (centroid_x, centroid_y, centroid_z),
                             'velocity': avg_velocity,
                             'timestamp': time.time(),
-                            'points': len(cluster_points)
+                            'points': len(cluster_points),
+                            'min_distance': cluster_min_distance,
+                            'avg_distance': avg_cluster_distance
                         }
                     
                     # Create visualization markers
@@ -296,6 +749,24 @@ class RadarClient_clusters(Node):
                 # Publish occupancy grid
                 grid_msg = self.create_occupancy_grid_msg(grid_data, current_time)
                 self.grid_publisher.publish(grid_msg)
+                
+                # Publish distance information
+                if avg_distances:
+                    avg_distance = sum(avg_distances) / len(avg_distances)
+                    distance_msg = std_msgs.msg.String()
+                    
+                    # Sort clusters by minimum distance
+                    sorted_clusters = sorted(cluster_distances, key=lambda x: x[1])
+                    
+                    # Build the message
+                    distance_info = (f"[RADAR DISTANCE] Min: {min_distance:.2f}m, Max: {max_distance:.2f}m, Avg: {avg_distance:.2f}m\n")
+                    distance_info += "Clusters by distance:\n"
+                    
+                    for i, (cluster_id, min_dist, avg_dist, num_points) in enumerate(sorted_clusters[:5]):  # Show top 5 closest
+                        distance_info += f"  #{i+1}: Cluster {cluster_id} - Min: {min_dist:.2f}m, Avg: {avg_dist:.2f}m, Points: {num_points}\n"
+                    
+                    distance_msg.data = distance_info
+                    self.distance_publisher.publish(distance_msg)
 
                 # Remove processed data from the buffer
                 self.data_buffer = self.data_buffer[offset:]
@@ -534,11 +1005,17 @@ class RadarClient_clusters(Node):
         
         return marker
 
-    def create_point_cloud2(self, points):
-        """Create a PointCloud2 message from a list of points"""
+    def create_point_cloud2(self, points, frame_id="radar_link"):
+        """
+        Create a PointCloud2 message from a list of points
+        
+        Args:
+            points: List of tuples (x, y, z, velocity, ...)
+            frame_id: Frame ID for the message
+        """
         pc2 = PointCloud2()
         pc2.header.stamp = self.get_clock().now().to_msg()
-        pc2.header.frame_id = "radar_link"
+        pc2.header.frame_id = frame_id
         
         # Define the fields
         fields = [
@@ -548,10 +1025,30 @@ class RadarClient_clusters(Node):
             PointField(name='velocity', offset=12, datatype=PointField.FLOAT32, count=1)
         ]
         
+        # Add optional fields if provided
+        field_count = 4
+        point_step = 16  # 4 fields * 4 bytes
+        
+        # Check if we have depth/azimuth/altitude
+        if points and len(points[0]) > 4:
+            fields.append(PointField(name='depth', offset=point_step, datatype=PointField.FLOAT32, count=1))
+            point_step += 4
+            field_count += 1
+            
+            if len(points[0]) > 5:
+                fields.append(PointField(name='azimuth', offset=point_step, datatype=PointField.FLOAT32, count=1))
+                point_step += 4
+                field_count += 1
+                
+                if len(points[0]) > 6:
+                    fields.append(PointField(name='altitude', offset=point_step, datatype=PointField.FLOAT32, count=1))
+                    point_step += 4
+                    field_count += 1
+        
         # Set the fields in the message
         pc2.fields = fields
         pc2.is_bigendian = False
-        pc2.point_step = 16  # 4 fields * 4 bytes
+        pc2.point_step = point_step
         pc2.row_step = pc2.point_step * len(points)
         
         # Use numpy for more efficient packing
@@ -566,6 +1063,260 @@ class RadarClient_clusters(Node):
         pc2.is_dense = True
         
         return pc2
+
+    def publish_radar_distances(self):
+        """Publish the radar distance measurements"""
+        if not self.recent_measurements:
+            return
+            
+        # Create a Float32MultiArray message for the raw distances
+        distances_msg = Float32MultiArray()
+        
+        # Format: [depth, azimuth, velocity, x, y, z, ...]
+        data = []
+        for measurement in self.recent_measurements[-10:]:  # Use most recent 10 measurements
+            data.extend([
+                measurement['depth'],                # Radial distance
+                measurement['azimuth'],              # Azimuth angle
+                measurement['velocity'],             # Radial velocity
+                measurement['x'],                    # X position (forward)
+                measurement['y'],                    # Y position (lateral)
+                measurement['z'],                    # Z position (vertical)
+                measurement['horizontal_distance'],  # Distance in XY plane
+                measurement['angle_to_target']       # Angle to target in degrees
+            ])
+            
+        distances_msg.data = data
+        self.raw_distance_publisher.publish(distances_msg)
+        
+        # Also publish a formatted text message with detailed metrics
+        distance_msg = std_msgs.msg.String()
+        distance_info = "[RADAR DISTANCE SUMMARY]\n"
+        
+        # Sort measurements by direct distance (closest first)
+        sorted_measurements = sorted(self.recent_measurements[-5:], key=lambda x: x['depth'])
+        
+        for i, measurement in enumerate(sorted_measurements):
+            distance_info += (
+                f"Target #{i+1}:\n"
+                f"  Distance: {measurement['depth']:.2f}m at {measurement['azimuth']:.2f}°\n"
+                f"  Position (x,y,z): ({measurement['x']:.2f}, {measurement['y']:.2f}, {measurement['z']:.2f})m\n"
+                f"  Velocity: {measurement['velocity']:.2f}m/s "
+                f"({'approaching' if measurement['velocity'] < 0 else 'receding'})\n"
+            )
+            
+            # Add time to collision if approaching
+            if measurement['velocity'] < 0:
+                distance_info += f"  Time to collision: {measurement['time_to_collision']:.2f}s\n"
+            
+            distance_info += "\n"
+            
+        distance_msg.data = distance_info
+        self.distance_publisher.publish(distance_msg)
+
+    def carla_radar_callback(self, msg):
+        """
+        Handle raw CARLA radar data from Float32MultiArray format
+        Format expected: [altitude, azimuth, depth, velocity, ...]
+        """
+        try:
+            # Check if we have valid data (must be multiple of 4)
+            if len(msg.data) % 4 != 0:
+                self.get_logger().warn(f'[CARLA RADAR] Invalid data length: {len(msg.data)}')
+                return
+                
+            # Process the radar points (each point is 4 consecutive values)
+            for i in range(0, len(msg.data), 4):
+                if i+3 < len(msg.data):
+                    altitude = msg.data[i]
+                    azimuth = msg.data[i+1]
+                    depth = msg.data[i+2]
+                    velocity = msg.data[i+3]
+                    
+                    # Convert to Cartesian coordinates and check validity
+                    x, y, z, distance, horizontal_distance, velocity, is_valid = self.carla_radar_to_distance(
+                        altitude, azimuth, depth, velocity)
+                    
+                    if is_valid:
+                        # Store the point for later processing
+                        point_data = {
+                            'altitude': altitude,
+                            'azimuth': azimuth,
+                            'depth': depth,
+                            'velocity': velocity,
+                            'x': x,
+                            'y': y,
+                            'z': z,
+                            'horizontal_distance': horizontal_distance,
+                            'timestamp': self.get_clock().now().to_msg(),
+                        }
+                        
+                        # Add to CARLA radar data buffer
+                        self.carla_radar_data.append(point_data)
+                        
+                        # Limit buffer size
+                        if len(self.carla_radar_data) > self.max_carla_points:
+                            self.carla_radar_data.pop(0)
+                            
+            # Log reception of data
+            self.get_logger().debug(f'[CARLA RADAR] Received {len(msg.data)//4} radar points')
+            
+        except Exception as e:
+            self.get_logger().error(f'[CARLA RADAR] Error processing radar data: {str(e)}')
+            import traceback
+            traceback.print_exc()
+
+    def publish_carla_radar_data(self):
+        """Publish the CARLA radar data as point cloud and markers"""
+        if not self.carla_radar_data:
+            return
+            
+        try:
+            # Create point cloud from CARLA radar data
+            points = []
+            for point in self.carla_radar_data:
+                points.append((
+                    point['x'], 
+                    point['y'], 
+                    point['z'], 
+                    point['velocity'],
+                    point['depth'],
+                    point['azimuth'],
+                    point['altitude']
+                ))
+                
+            # Create and publish point cloud
+            pc2_msg = self.create_point_cloud2(points, frame_id="radar_link")
+            self.carla_radar_points_publisher.publish(pc2_msg)
+            
+            # Create markers for visualization
+            marker_array = MarkerArray()
+            
+            # Create a single marker with all points
+            marker = Marker()
+            marker.header.frame_id = "radar_link"
+            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.ns = "carla_radar_points"
+            marker.id = 0
+            marker.type = Marker.POINTS
+            marker.action = Marker.ADD
+            marker.scale.x = 0.3  # Point size
+            marker.scale.y = 0.3
+            marker.lifetime.sec = 0  # Persistent
+            
+            # Add points with velocity-based coloring
+            for point in self.carla_radar_data:
+                p = geometry_msgs.msg.Point()
+                p.x = point['x']
+                p.y = point['y']
+                p.z = point['z']
+                marker.points.append(p)
+                
+                # Add color for each point based on velocity
+                color = ColorRGBA()
+                velocity = point['velocity']
+                
+                if abs(velocity) < self.velocity_threshold:
+                    # Stationary object - gray
+                    color.r = 0.7
+                    color.g = 0.7
+                    color.b = 0.7
+                elif velocity > 0:
+                    # Approaching (red to yellow based on speed)
+                    intensity = min(1.0, velocity / 10.0)
+                    color.r = 1.0
+                    color.g = 1.0 - intensity
+                    color.b = 0.0
+                else:
+                    # Moving away (blue to cyan based on speed)
+                    intensity = min(1.0, abs(velocity) / 10.0)
+                    color.r = 0.0
+                    color.g = intensity
+                    color.b = 1.0
+                    
+                color.a = 1.0
+                marker.colors.append(color)
+                
+            marker_array.markers.append(marker)
+            
+            # Add distance rings
+            for distance in [5.0, 10.0, 20.0, 50.0, 100.0]:
+                if distance <= CARLA_RADAR_RANGE:
+                    ring_marker = self.create_distance_ring_marker(distance)
+                    marker_array.markers.append(ring_marker)
+            
+            # Publish markers
+            self.carla_radar_markers_publisher.publish(marker_array)
+            
+        except Exception as e:
+            self.get_logger().error(f'[CARLA RADAR] Error publishing radar data: {str(e)}')
+            import traceback
+            traceback.print_exc()
+
+    def create_distance_ring_marker(self, radius):
+        """Create a ring marker at specified radius for distance visualization"""
+        marker = Marker()
+        marker.header.frame_id = "radar_link"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "distance_rings"
+        marker.id = int(radius)  # Use radius as ID
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.scale.x = 0.1  # Line width
+        marker.color.r = 0.8
+        marker.color.g = 0.8
+        marker.color.b = 0.8
+        marker.color.a = 0.5
+        marker.lifetime.sec = 0  # Persistent
+        
+        # Create ring points
+        segments = 50  # Number of segments in the ring
+        for i in range(segments + 1):
+            angle = 2.0 * math.pi * i / segments
+            p = geometry_msgs.msg.Point()
+            p.x = radius * math.cos(angle)
+            p.y = radius * math.sin(angle)
+            p.z = 0.0
+            marker.points.append(p)
+        
+        return marker
+
+    def carla_radar_to_distance(self, altitude, azimuth, depth, velocity):
+        """
+        Convert CARLA radar polar coordinates to distance measurements and Cartesian coordinates.
+        Uses CARLA's specific coordinate system (x-forward, y-right, z-up)
+        
+        Args:
+            altitude (float): Elevation angle in degrees
+            azimuth (float): Azimuth angle in degrees
+            depth (float): Radial distance in meters
+            velocity (float): Radial velocity in m/s
+            
+        Returns:
+            tuple: (x, y, z, distance, horizontal_distance, velocity, is_valid)
+        """
+        # Convert angles to radians
+        azimuth_rad = np.radians(azimuth)
+        altitude_rad = np.radians(altitude)
+        
+        # Calculate Cartesian coordinates
+        # For CARLA radar, the convention is:
+        # x: forward, y: right, z: up
+        x = depth * np.cos(altitude_rad) * np.cos(azimuth_rad)
+        y = depth * np.cos(altitude_rad) * np.sin(azimuth_rad)
+        z = depth * np.sin(altitude_rad)
+        
+        # Calculate horizontal distance (distance in xy-plane)
+        horizontal_distance = np.sqrt(x*x + y*y)
+        
+        # Check if within the radar's FOV limits
+        in_horizontal_fov = abs(azimuth) <= CARLA_RADAR_HORIZONTAL_FOV / 2
+        in_vertical_fov = abs(altitude) <= CARLA_RADAR_VERTICAL_FOV / 2
+        in_range = depth <= CARLA_RADAR_RANGE
+        
+        is_valid = in_horizontal_fov and in_vertical_fov and in_range
+        
+        return (x, y, z, depth, horizontal_distance, velocity, is_valid)
 
     def __del__(self):
         self.get_logger().info('[RADAR] Closing socket connection')
