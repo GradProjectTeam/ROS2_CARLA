@@ -15,6 +15,7 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'rviz'), glob('rviz/*.rviz')),
         (os.path.join('share', package_name, 'rviz2'), glob('rviz2/*.rviz')),
+        (os.path.join('share', package_name, 'scripts'), glob('scripts/*.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -38,6 +39,9 @@ setup(
             'fusion_costmap_creator = ' + package_name + '.fusion_costmap_creator:main',
             'three_sensor_fusion = ' + package_name + '.three_sensor_fusion:main',
             'radar_object_detector = ' + package_name + '.radar_object_detector:main',
+            'imu_euler_visualizer_simple = ' + package_name + '.imu_euler_visualizer_simple:main',
+            'tf_alignment_check = ' + package_name + '.tf_alignment_check:main',
+            'semantic_costmap_visualizer = ' + package_name + '.semantic_costmap_visualizer:main',
         ],
     },
 )

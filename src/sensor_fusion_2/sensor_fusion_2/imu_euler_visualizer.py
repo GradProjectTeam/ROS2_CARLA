@@ -13,6 +13,7 @@ import math
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from std_msgs.msg import ColorRGBA
 from threading import Lock
+import collections  # For more sophisticated filtering
 
 # Our own implementation of quaternion_from_euler to replace tf_transformations
 def quaternion_from_euler(roll, pitch, yaw):
@@ -89,6 +90,77 @@ class Colors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
 
+# Improved complementary filter for sensor fusion
+class ComplementaryFilter:
+    def __init__(self, alpha=0.98, dt=0.01):
+        """
+        Initialize complementary filter
+        
+        Args:
+            alpha: Weight for gyroscope data (0-1)
+            dt: Time step in seconds
+        """
+        self.alpha = alpha
+        self.dt = dt
+        self.roll = 0.0
+        self.pitch = 0.0
+        self.yaw = 0.0
+        self.initialized = False
+        
+    def update(self, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, compass=None):
+        """
+        Update filter with new sensor data
+        
+        Returns:
+            roll, pitch, yaw in radians
+        """
+        # Calculate roll and pitch from accelerometer
+        accel_magnitude = math.sqrt(accel_x**2 + accel_y**2 + accel_z**2)
+        
+        # Only use accelerometer if magnitude is close to gravity
+        if 8.0 < accel_magnitude < 11.0:
+            accel_roll = math.atan2(accel_y, math.sqrt(accel_x**2 + accel_z**2))
+            accel_pitch = -math.atan2(accel_x, math.sqrt(accel_y**2 + accel_z**2))
+            
+            if not self.initialized:
+                # First measurement, initialize with accelerometer
+                self.roll = accel_roll
+                self.pitch = accel_pitch
+                if compass is not None:
+                    self.yaw = compass
+                self.initialized = True
+            else:
+                # Complementary filter
+                # Integrate gyro rates
+                gyro_roll = self.roll + gyro_x * self.dt
+                gyro_pitch = self.pitch + gyro_y * self.dt
+                
+                # Combine with accelerometer (complementary filter)
+                self.roll = self.alpha * gyro_roll + (1 - self.alpha) * accel_roll
+                self.pitch = self.alpha * gyro_pitch + (1 - self.alpha) * accel_pitch
+        else:
+            # High acceleration, rely more on gyro
+            self.roll += gyro_x * self.dt
+            self.pitch += gyro_y * self.dt
+            
+        # Update yaw from gyro or compass if available
+        if compass is not None:
+            # Use compass for absolute yaw reference
+            # Apply complementary filter to blend with gyro
+            gyro_yaw = self.yaw + gyro_z * self.dt
+            self.yaw = 0.8 * gyro_yaw + 0.2 * compass
+        else:
+            # No compass, use gyro only
+            self.yaw += gyro_z * self.dt
+            
+        # Normalize yaw to [-pi, pi]
+        while self.yaw > math.pi:
+            self.yaw -= 2.0 * math.pi
+        while self.yaw < -math.pi:
+            self.yaw += 2.0 * math.pi
+            
+        return self.roll, self.pitch, self.yaw
+
 class ImuEulerVisualizer(Node):
     def __init__(self):
         super().__init__('imu_euler_visualizer')
@@ -108,6 +180,18 @@ class ImuEulerVisualizer(Node):
             self.declare_parameter('world_frame_id', 'world')
         if not self.has_parameter('filter_window_size'):
             self.declare_parameter('filter_window_size', 5)
+        if not self.has_parameter('queue_size'):
+            self.declare_parameter('queue_size', 20)
+        if not self.has_parameter('publish_rate'):
+            self.declare_parameter('publish_rate', 200.0)  # Hz
+        if not self.has_parameter('socket_buffer_size'):
+            self.declare_parameter('socket_buffer_size', 65536)
+        if not self.has_parameter('enable_bias_correction'):
+            self.declare_parameter('enable_bias_correction', True)
+        if not self.has_parameter('enable_complementary_filter'):
+            self.declare_parameter('enable_complementary_filter', True)
+        if not self.has_parameter('zero_velocity_threshold'):
+            self.declare_parameter('zero_velocity_threshold', 0.02)  # m/s^2
         if not self.has_parameter('yaw_offset'):
             self.declare_parameter('yaw_offset', 0.0)  # Offset to align IMU with vehicle forward direction
         if not self.has_parameter('road_plane_correction'):
@@ -124,6 +208,12 @@ class ImuEulerVisualizer(Node):
         self.frame_id = self.get_parameter('frame_id').value
         self.world_frame_id = self.get_parameter('world_frame_id').value
         self.filter_window_size = self.get_parameter('filter_window_size').value
+        self.queue_size = self.get_parameter('queue_size').value
+        self.publish_rate = self.get_parameter('publish_rate').value
+        self.socket_buffer_size = self.get_parameter('socket_buffer_size').value
+        self.enable_bias_correction = self.get_parameter('enable_bias_correction').value
+        self.enable_complementary_filter = self.get_parameter('enable_complementary_filter').value
+        self.zero_velocity_threshold = self.get_parameter('zero_velocity_threshold').value
         self.yaw_offset = self.get_parameter('yaw_offset').value
         self.road_plane_correction = self.get_parameter('road_plane_correction').value
         self.gravity_aligned = self.get_parameter('gravity_aligned').value
@@ -162,16 +252,28 @@ class ImuEulerVisualizer(Node):
         self.IMU_DATA_SIZE = struct.calcsize('ffffffffff')  # 40 bytes
         self.get_logger().info(f'{Colors.GREEN}Receiving IMU data format with 10 values (acc, gyro, compass, roll, pitch, yaw){Colors.ENDC}')
         
+        # Initialize complementary filter
+        self.comp_filter = ComplementaryFilter(alpha=0.98, dt=1.0/self.publish_rate)
+        
         # Initialize data buffers for moving average filter
-        self.accel_x_buffer = []
-        self.accel_y_buffer = []
-        self.accel_z_buffer = []
-        self.gyro_x_buffer = []
-        self.gyro_y_buffer = []
-        self.gyro_z_buffer = []
-        self.roll_buffer = []
-        self.pitch_buffer = []
-        self.yaw_buffer = []
+        # Using deque for efficient fixed-size buffer
+        self.buffer_size = max(10, self.filter_window_size)
+        self.accel_x_buffer = collections.deque(maxlen=self.buffer_size)
+        self.accel_y_buffer = collections.deque(maxlen=self.buffer_size)
+        self.accel_z_buffer = collections.deque(maxlen=self.buffer_size)
+        self.gyro_x_buffer = collections.deque(maxlen=self.buffer_size)
+        self.gyro_y_buffer = collections.deque(maxlen=self.buffer_size)
+        self.gyro_z_buffer = collections.deque(maxlen=self.buffer_size)
+        self.roll_buffer = collections.deque(maxlen=self.buffer_size)
+        self.pitch_buffer = collections.deque(maxlen=self.buffer_size)
+        self.yaw_buffer = collections.deque(maxlen=self.buffer_size)
+        
+        # Bias estimation
+        self.gyro_bias_x = 0.0
+        self.gyro_bias_y = 0.0
+        self.gyro_bias_z = 0.0
+        self.bias_samples = 0
+        self.bias_calibrated = False
 
         # Print welcome message
         self.print_welcome_message()
@@ -180,7 +282,7 @@ class ImuEulerVisualizer(Node):
         self.connect()
         
         # Timer for data processing
-        self.create_timer(0.01, self.process_data)  # 100Hz processing
+        self.create_timer(1.0/self.publish_rate, self.process_data)  # Process at specified rate
         
         # Timer for connection check
         self.create_timer(1.0, self.check_connection)
@@ -196,6 +298,10 @@ class ImuEulerVisualizer(Node):
         print(f"Publishing Euler angle visualization markers on topic: {Colors.CYAN}imu/euler_markers{Colors.ENDC}")
         print(f"Also publishing standard IMU data on topic: {Colors.CYAN}imu/data{Colors.ENDC}")
         print(f"Publishing TF transform between {Colors.GREEN}{self.world_frame_id}{Colors.ENDC} and {Colors.GREEN}{self.frame_id}{Colors.ENDC}")
+        print(f"Processing rate: {Colors.YELLOW}{self.publish_rate:.1f} Hz{Colors.ENDC}")
+        print(f"Filter window size: {Colors.YELLOW}{self.filter_window_size}{Colors.ENDC}")
+        print(f"Bias correction: {Colors.YELLOW}{self.enable_bias_correction}{Colors.ENDC}")
+        print(f"Complementary filter: {Colors.YELLOW}{self.enable_complementary_filter}{Colors.ENDC}")
         print(f"Yaw offset: {Colors.YELLOW}{math.degrees(self.yaw_offset):.2f}°{Colors.ENDC}")
         print(f"Road plane correction: {Colors.YELLOW}{self.road_plane_correction}{Colors.ENDC}")
         print(f"Gravity aligned: {Colors.YELLOW}{self.gravity_aligned}{Colors.ENDC}")
@@ -215,8 +321,17 @@ class ImuEulerVisualizer(Node):
             self.socket.settimeout(1.0)  # 1 second timeout
             self.socket.connect((self.tcp_ip, self.tcp_port))
             self.socket.setblocking(False)  # Non-blocking socket
+            
+            # Set socket buffer size
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self.socket_buffer_size)
+            
             self.connected = True
             self.buffer = b''  # Clear buffer on new connection
+            
+            # Reset bias calibration on new connection
+            self.bias_calibrated = False
+            self.bias_samples = 0
+            
             self.get_logger().info(f'{Colors.GREEN}Connected to IMU server at {self.tcp_ip}:{self.tcp_port}{Colors.ENDC}')
         except Exception as e:
             self.connected = False
@@ -236,9 +351,38 @@ class ImuEulerVisualizer(Node):
     def apply_moving_average(self, value, buffer):
         """Apply moving average filter to smooth out noise"""
         buffer.append(value)
-        if len(buffer) > self.filter_window_size:
-            buffer.pop(0)
-        return sum(buffer) / len(buffer)
+        if len(buffer) > 0:
+            return sum(buffer) / len(buffer)
+        return value
+    
+    def estimate_gyro_bias(self, gyro_x, gyro_y, gyro_z):
+        """Estimate gyro bias during stationary periods"""
+        if not self.enable_bias_correction:
+            return gyro_x, gyro_y, gyro_z
+            
+        # Check if we're stationary based on gyro values
+        gyro_magnitude = math.sqrt(gyro_x**2 + gyro_y**2 + gyro_z**2)
+        
+        if gyro_magnitude < self.zero_velocity_threshold:
+            # We're likely stationary, update bias estimate
+            if not self.bias_calibrated:
+                # Still calibrating
+                self.gyro_bias_x = ((self.bias_samples * self.gyro_bias_x) + gyro_x) / (self.bias_samples + 1)
+                self.gyro_bias_y = ((self.bias_samples * self.gyro_bias_y) + gyro_y) / (self.bias_samples + 1)
+                self.gyro_bias_z = ((self.bias_samples * self.gyro_bias_z) + gyro_z) / (self.bias_samples + 1)
+                self.bias_samples += 1
+                
+                if self.bias_samples >= 100:  # After 100 samples, consider bias calibrated
+                    self.bias_calibrated = True
+                    self.get_logger().info(f"Gyro bias calibrated: x={self.gyro_bias_x:.6f}, y={self.gyro_bias_y:.6f}, z={self.gyro_bias_z:.6f}")
+            else:
+                # Already calibrated, just update with small weight
+                self.gyro_bias_x = 0.99 * self.gyro_bias_x + 0.01 * gyro_x
+                self.gyro_bias_y = 0.99 * self.gyro_bias_y + 0.01 * gyro_y
+                self.gyro_bias_z = 0.99 * self.gyro_bias_z + 0.01 * gyro_z
+                
+        # Apply bias correction
+        return gyro_x - self.gyro_bias_x, gyro_y - self.gyro_bias_y, gyro_z - self.gyro_bias_z
             
     def process_data(self):
         """Process data from the TCP socket and visualize Euler angles in RViz2"""
@@ -276,10 +420,34 @@ class ImuEulerVisualizer(Node):
                 compass = imu_values[6]                          # Compass value
                 roll_deg, pitch_deg, yaw_deg = imu_values[7:10]  # Orientation in degrees
                 
+                # Apply bias correction to gyroscope data
+                if self.enable_bias_correction:
+                    gyro_x, gyro_y, gyro_z = self.estimate_gyro_bias(gyro_x, gyro_y, gyro_z)
+                
+                # Apply moving average filter to raw sensor data
+                accel_x = self.apply_moving_average(accel_x, self.accel_x_buffer)
+                accel_y = self.apply_moving_average(accel_y, self.accel_y_buffer)
+                accel_z = self.apply_moving_average(accel_z, self.accel_z_buffer)
+                gyro_x = self.apply_moving_average(gyro_x, self.gyro_x_buffer)
+                gyro_y = self.apply_moving_average(gyro_y, self.gyro_y_buffer)
+                gyro_z = self.apply_moving_average(gyro_z, self.gyro_z_buffer)
+                
                 # Convert orientation to radians for ROS2
                 roll_rad = math.radians(roll_deg)
                 pitch_rad = math.radians(pitch_deg)
                 yaw_rad = math.radians(yaw_deg)
+                
+                # Convert compass to radians
+                compass_rad = math.radians(compass)
+                
+                # Apply our own sensor fusion if enabled
+                if self.enable_complementary_filter:
+                    # Use complementary filter to fuse accelerometer and gyroscope data
+                    roll_rad, pitch_rad, yaw_rad = self.comp_filter.update(
+                        accel_x, accel_y, accel_z, 
+                        gyro_x, gyro_y, gyro_z,
+                        compass_rad
+                    )
                 
                 # Apply yaw offset to align with vehicle forward direction
                 yaw_rad = yaw_rad + self.yaw_offset
@@ -290,44 +458,14 @@ class ImuEulerVisualizer(Node):
                 while yaw_rad < -math.pi:
                     yaw_rad += 2.0 * math.pi
                 
-                # If gravity aligned, use accelerometer to determine true roll and pitch
-                if self.gravity_aligned:
-                    # Calculate roll and pitch from accelerometer (gravity vector)
-                    # This is more accurate for vehicle orientation relative to ground
-                    accel_magnitude = math.sqrt(accel_x*accel_x + accel_y*accel_y + accel_z*accel_z)
-                    
-                    if accel_magnitude > 0.1:  # Ensure we have valid accelerometer data
-                        # Normalize accelerometer values
-                        accel_x_norm = accel_x / accel_magnitude
-                        accel_y_norm = accel_y / accel_magnitude
-                        accel_z_norm = accel_z / accel_magnitude
-                        
-                        # Calculate roll (rotation around X-axis) - positive is right tilt
-                        accel_roll = math.atan2(accel_y_norm, math.sqrt(accel_x_norm*accel_x_norm + accel_z_norm*accel_z_norm))
-                        
-                        # Calculate pitch (rotation around Y-axis) - positive is forward tilt
-                        accel_pitch = -math.atan2(accel_x_norm, math.sqrt(accel_y_norm*accel_y_norm + accel_z_norm*accel_z_norm))
-                        
-                        # Blend with gyro-derived values for stability (complementary filter)
-                        # Use more weight from accelerometer for roll and pitch
-                        roll_rad = 0.8 * accel_roll + 0.2 * roll_rad
-                        pitch_rad = 0.8 * accel_pitch + 0.2 * pitch_rad
-                
                 # Apply road plane correction if enabled
                 if self.road_plane_correction:
                     # For vehicles, we often want to minimize roll and pitch
                     # to represent orientation relative to the road plane
-                    # This is useful when the IMU is not perfectly aligned with the vehicle
                     roll_rad *= 0.8  # Reduce roll influence
                     pitch_rad *= 0.8  # Reduce pitch influence
                 
-                # Apply moving average filter to smooth data
-                accel_x = self.apply_moving_average(accel_x, self.accel_x_buffer)
-                accel_y = self.apply_moving_average(accel_y, self.accel_y_buffer)
-                accel_z = self.apply_moving_average(accel_z, self.accel_z_buffer)
-                gyro_x = self.apply_moving_average(gyro_x, self.gyro_x_buffer)
-                gyro_y = self.apply_moving_average(gyro_y, self.gyro_y_buffer)
-                gyro_z = self.apply_moving_average(gyro_z, self.gyro_z_buffer)
+                # Apply final moving average filter to orientation angles
                 roll_rad = self.apply_moving_average(roll_rad, self.roll_buffer)
                 pitch_rad = self.apply_moving_average(pitch_rad, self.pitch_buffer)
                 yaw_rad = self.apply_moving_average(yaw_rad, self.yaw_buffer)

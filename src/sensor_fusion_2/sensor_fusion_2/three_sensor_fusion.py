@@ -21,7 +21,7 @@ class ThreeSensorFusion(Node):
     This node:
     1. Subscribes to LiDAR map data
     2. Subscribes to radar map data
-    3. Subscribes to IMU orientation data
+    3. Subscribes to IMU orientation data (with compass values in degrees)
     4. Applies intelligent fusion algorithms to combine the data
     5. Publishes a unified map that leverages the strengths of each sensor
     6. Provides visualization for the fused data
@@ -213,6 +213,7 @@ class ThreeSensorFusion(Node):
         self.get_logger().info('Three Sensor Fusion node initialized')
         self.get_logger().info(f'Using adaptive weighting: {self.use_adaptive_weighting}')
         self.get_logger().info(f'Max timestamp difference: {self.max_timestamp_diff} seconds')
+        self.get_logger().info('IMU data now includes compass values in degrees')
     
     def check_topic_status(self):
         """Check and log the status of subscribed topics"""
@@ -280,6 +281,12 @@ class ThreeSensorFusion(Node):
                 self.get_logger().info(f'Received radar map, timestamp: {timestamp_ms/1000.0}, size: {width}x{height}')
     
     def imu_callback(self, msg):
+        """
+        Process incoming IMU data
+        
+        The orientation quaternion in the IMU message is created from compass values 
+        that are in degrees but have been converted to radians for the quaternion.
+        """
         with self.imu_lock:
             self.imu_data = msg
             self.imu_timestamp = msg.header.stamp
@@ -289,16 +296,24 @@ class ThreeSensorFusion(Node):
             q = msg.orientation
             self.roll, self.pitch, self.yaw = self.euler_from_quaternion(q.x, q.y, q.z, q.w)
             
+            # Log orientation in degrees for better readability
             if self.verbose_logging:
                 timestamp_ms = self.imu_timestamp.nanosec // 1000000
+                roll_deg = math.degrees(self.roll)
+                pitch_deg = math.degrees(self.pitch)
+                yaw_deg = math.degrees(self.yaw)
                 self.get_logger().info(f'Received IMU data, timestamp: {timestamp_ms/1000.0}, '
-                                      f'roll: {math.degrees(self.roll):.2f}°, '
-                                      f'pitch: {math.degrees(self.pitch):.2f}°, '
-                                      f'yaw: {math.degrees(self.yaw):.2f}°')
+                                      f'roll: {roll_deg:.2f}°, '
+                                      f'pitch: {pitch_deg:.2f}°, '
+                                      f'yaw: {yaw_deg:.2f}°')
     
     def euler_from_quaternion(self, x, y, z, w):
         """
         Convert quaternion to Euler angles (roll, pitch, yaw)
+        
+        This function extracts Euler angles from a quaternion. The quaternion is 
+        created from compass values that were originally in degrees but converted 
+        to radians for the quaternion. The output of this function is in radians.
         """
         # Roll (x-axis rotation)
         sinr_cosp = 2.0 * (w * x + y * z)
@@ -385,7 +400,13 @@ class ThreeSensorFusion(Node):
             return self.lidar_weight, self.radar_weight, self.imu_weight
     
     def apply_orientation_correction(self, map_data):
-        """Apply orientation correction based on IMU data"""
+        """
+        Apply orientation correction based on IMU data
+        
+        The yaw value is already in radians (converted from the quaternion). 
+        The quaternion was originally created from compass values in degrees
+        that were converted to radians.
+        """
         if not self.orientation_correction or not self.imu_received:
             return map_data
             
@@ -395,7 +416,6 @@ class ThreeSensorFusion(Node):
             
             # Create rotation matrix from IMU orientation
             # This is a simplified rotation that only considers yaw (heading)
-            # For a full 3D rotation, we would need to consider roll and pitch as well
             cos_yaw = math.cos(-self.yaw)  # Negative yaw because we're rotating the map, not the vehicle
             sin_yaw = math.sin(-self.yaw)
             

@@ -68,6 +68,31 @@ def generate_launch_description():
         description='Port for IMU TCP connection'
     )
     
+    # IMU processing parameters
+    declare_imu_filter_window = DeclareLaunchArgument(
+        'imu_filter_window',
+        default_value='5',
+        description='Window size for IMU moving average filter'
+    )
+    
+    declare_imu_enable_bias_correction = DeclareLaunchArgument(
+        'imu_enable_bias_correction',
+        default_value='true',
+        description='Enable IMU gyroscope bias correction'
+    )
+    
+    declare_imu_enable_complementary_filter = DeclareLaunchArgument(
+        'imu_enable_complementary_filter',
+        default_value='true',
+        description='Enable IMU complementary filter for sensor fusion'
+    )
+    
+    declare_imu_publish_rate = DeclareLaunchArgument(
+        'imu_publish_rate',
+        default_value='100.0',
+        description='Rate at which to publish IMU data (Hz)'
+    )
+    
     # Vehicle parameters
     declare_vehicle_length = DeclareLaunchArgument(
         'vehicle_length',
@@ -104,6 +129,19 @@ def generate_launch_description():
         'lidar_z_offset',
         default_value='1.9',
         description='Z offset of the lidar relative to the IMU'
+    )
+    
+    declare_lidar_yaw_offset = DeclareLaunchArgument(
+        'lidar_yaw_offset',
+        default_value='0.0',  # Default to forward direction
+        description='Yaw rotation of LiDAR in radians'
+    )
+    
+    # Radar positioning parameters
+    declare_radar_yaw_offset = DeclareLaunchArgument(
+        'radar_yaw_offset',
+        default_value='0.0',  # ~96 degrees in radians - to align with observed LiDAR direction
+        description='Yaw rotation of radar in radians (to align with LiDAR)'
     )
     
     # Fusion parameters
@@ -162,19 +200,19 @@ def generate_launch_description():
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
     )
     
-    # IMU to LiDAR transform
-    imu_to_lidar_node = Node(
+    # Base to LiDAR transform (directly connected to base_link)
+    base_to_lidar_node = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        name='tf_imu_to_lidar',
+        name='tf_base_to_lidar',
         arguments=[
             LaunchConfiguration('lidar_x_offset'),
             LaunchConfiguration('lidar_y_offset'),
             LaunchConfiguration('lidar_z_offset'),
-            '0',    # Roll
-            '0',    # Pitch
-            '0',    # Yaw
-            'imu_link', 
+            '0',    # Roll - aligned with vehicle
+            '0',    # Pitch - aligned with vehicle
+            LaunchConfiguration('lidar_yaw_offset'),    # Yaw - adjustable to set LiDAR orientation
+            'base_link', 
             'lidar_link'
         ],
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
@@ -189,20 +227,25 @@ def generate_launch_description():
             '1.5',  # X offset (forward from base)
             '0.0',  # Y offset (left/right)
             '1.0',  # Z offset (up from base) - radar is 1m above the base
-            '0',    # Roll
-            '0',    # Pitch
-            '0',    # Yaw
+            '0',    # Roll - aligned with vehicle
+            '0',    # Pitch - aligned with vehicle
+            LaunchConfiguration('radar_yaw_offset'),    # Yaw - adjusted to align with LiDAR view
             'base_link', 
             'radar_link'
         ],
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
     )
     
+    # Add comment about transform chain
+    # Note: The transform chain is:
+    # world -> map -> base_link -> [imu_link, lidar_link, radar_link]
+    # All transforms are static relative to their parent frames
+    
     # ==================== SENSOR NODES ====================
     # IMU Node
     imu_euler_visualizer_node = Node(
         package='sensor_fusion_2',
-        executable='imu_euler_visualizer',
+        executable='imu_euler_visualizer_simple',
         name='imu_euler_visualizer',
         parameters=[{
             'tcp_ip': LaunchConfiguration('imu_tcp_ip'),
@@ -210,14 +253,13 @@ def generate_launch_description():
             'reconnect_interval': 1.0,
             'frame_id': 'imu_link',
             'world_frame_id': 'world',
-            'filter_window_size': 2,
-            'queue_size': 20,
-            'publish_rate': 200.0,
+            'publish_rate': LaunchConfiguration('imu_publish_rate'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
             'socket_buffer_size': 65536,
-            'enable_bias_correction': True,
-            'enable_complementary_filter': True,
-            'zero_velocity_threshold': 0.02,
+            'yaw_offset': 0.0,  
+            'vehicle_forward_axis': 'x',  # Vehicle forward axis
+            # Note: This node now expects compass values in degrees from TCP connection
+            # and handles the conversion to radians internally for ROS messages
         }],
         output='screen'
     )
@@ -236,7 +278,7 @@ def generate_launch_description():
             'vehicle_width': LaunchConfiguration('vehicle_width'),           
             'vehicle_height': LaunchConfiguration('vehicle_height'),
             'enable_motion_compensation': True,
-            'use_imu_data': True,
+            'use_imu_data': True,  # Uses IMU data where compass is in degrees (via TF transforms)
             'frame_id': 'lidar_link',
             'use_tf_transform': True,
             'publish_grid_map': True,
@@ -364,7 +406,7 @@ def generate_launch_description():
             'lidar_map_topic': '/lidar/map',
             'radar_map_topic': '/radar/map',
             'radar_points_topic': '/radar/points',
-            'imu_topic': '/imu/data',
+            'imu_topic': '/imu/data',  # This topic now receives IMU data with compass in degrees (converted to rad)
             'fused_map_topic': '/three_sensor_fused_map',
             'publish_rate': 5.0,
             'lidar_weight': LaunchConfiguration('lidar_weight'),
@@ -378,8 +420,8 @@ def generate_launch_description():
             'min_confidence_threshold': 0.3,
             'verbose_logging': True,
             'log_topic_info': True,
-            'use_imu_for_orientation': True,
-            'orientation_correction': True,
+            'use_imu_for_orientation': True,  # Uses quaternion created from compass in degrees
+            'orientation_correction': True,   # Orientation correction now handles compass in degrees
             'dynamic_obstacle_tracking': True,
             'radar_data_timeout': 2.0,
             'check_radar_points': True,
@@ -446,12 +488,18 @@ def generate_launch_description():
         declare_radar_tcp_port,
         declare_imu_tcp_ip,
         declare_imu_tcp_port,
+        declare_imu_filter_window,
+        declare_imu_enable_bias_correction,
+        declare_imu_enable_complementary_filter,
+        declare_imu_publish_rate,
         declare_vehicle_length,
         declare_vehicle_width,
         declare_vehicle_height,
         declare_lidar_x_offset,
         declare_lidar_y_offset,
         declare_lidar_z_offset,
+        declare_lidar_yaw_offset,
+        declare_radar_yaw_offset,
         declare_lidar_weight,
         declare_radar_weight,
         declare_imu_weight,
@@ -460,7 +508,7 @@ def generate_launch_description():
         world_to_map_node,
         map_to_base_link_node,
         base_to_imu_node,
-        imu_to_lidar_node,
+        base_to_lidar_node,
         base_to_radar_node,
         
         # Sensor Nodes
@@ -476,4 +524,4 @@ def generate_launch_description():
         
         # Visualization
         rviz_node
-    ]) 
+    ])
