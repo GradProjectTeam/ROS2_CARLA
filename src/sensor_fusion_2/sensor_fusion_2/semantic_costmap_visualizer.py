@@ -15,6 +15,8 @@ import tf2_ros
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 from std_srvs.srv import SetBool
+from rcl_interfaces.msg import ParameterDescriptor, FloatingPointRange, IntegerRange, SetParametersResult
+from rcl_interfaces.srv import GetParameters, SetParameters, ListParameters
 
 class SemanticCostmapVisualizer(Node):
     """
@@ -30,22 +32,8 @@ class SemanticCostmapVisualizer(Node):
     def __init__(self):
         super().__init__('semantic_costmap_visualizer')
         
-        # Declare parameters
-        self.declare_parameter('map_resolution', 0.2)
-        self.declare_parameter('map_width_meters', 60.0)
-        self.declare_parameter('map_height_meters', 60.0)
-        self.declare_parameter('map_frame', 'map')
-        self.declare_parameter('lidar_points_topic', '/lidar/points')
-        self.declare_parameter('lidar_clusters_topic', '/lidar/cubes')
-        self.declare_parameter('radar_points_topic', '/radar/points')
-        self.declare_parameter('radar_clusters_topic', '/radar/clusters')
-        self.declare_parameter('publish_rate', 10.0)  # Hz
-        self.declare_parameter('temporal_filtering', True)
-        self.declare_parameter('motion_prediction', True)
-        self.declare_parameter('min_confidence', 0.5)
-        self.declare_parameter('decay_time', 1.0)  # seconds
-        self.declare_parameter('enable_3d_visualization', True)
-        self.declare_parameter('enable_text_labels', True)
+        # Declare parameters with descriptors for dynamic reconfigure
+        self.add_dynamic_parameters()
         
         # Get parameters
         self.map_resolution = self.get_parameter('map_resolution').value
@@ -63,6 +51,15 @@ class SemanticCostmapVisualizer(Node):
         self.decay_time = self.get_parameter('decay_time').value
         self.enable_3d_visualization = self.get_parameter('enable_3d_visualization').value
         self.enable_text_labels = self.get_parameter('enable_text_labels').value
+        
+        # Add new parameters for classification
+        self.ground_height_threshold = self.get_parameter('ground_height_threshold').value
+        self.vegetation_height_ratio = self.get_parameter('vegetation_height_ratio').value
+        self.building_width_threshold = self.get_parameter('building_width_threshold').value
+        self.dynamic_velocity_threshold = self.get_parameter('dynamic_velocity_threshold').value
+        
+        # Add parameter callback
+        self.add_on_set_parameters_callback(self.parameters_callback)
         
         # Calculate map dimensions
         self.map_width = int(self.map_width_meters / self.map_resolution)
@@ -182,6 +179,305 @@ class SemanticCostmapVisualizer(Node):
         self.get_logger().info(f'Map dimensions: {self.map_width}x{self.map_height} cells')
         self.get_logger().info(f'Map resolution: {self.map_resolution} meters/cell')
     
+    def add_dynamic_parameters(self):
+        """Add parameters with descriptors for dynamic reconfigure"""
+        # Map parameters
+        self.declare_parameter(
+            'map_resolution', 
+            0.2,
+            ParameterDescriptor(
+                description='Resolution of the costmap in meters per cell',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.05, 
+                    to_value=1.0, 
+                    step=0.05
+                )]
+            )
+        )
+        
+        self.declare_parameter(
+            'map_width_meters', 
+            60.0,
+            ParameterDescriptor(
+                description='Width of the costmap in meters',
+                floating_point_range=[FloatingPointRange(
+                    from_value=10.0, 
+                    to_value=200.0, 
+                    step=10.0
+                )]
+            )
+        )
+        
+        self.declare_parameter(
+            'map_height_meters', 
+            60.0,
+            ParameterDescriptor(
+                description='Height of the costmap in meters',
+                floating_point_range=[FloatingPointRange(
+                    from_value=10.0, 
+                    to_value=200.0, 
+                    step=10.0
+                )]
+            )
+        )
+        
+        self.declare_parameter('map_frame', 'map')
+        
+        # Topic parameters
+        self.declare_parameter('lidar_points_topic', '/lidar/points')
+        self.declare_parameter('lidar_clusters_topic', '/lidar/cubes')
+        self.declare_parameter('radar_points_topic', '/radar/points')
+        self.declare_parameter('radar_clusters_topic', '/radar/clusters')
+        
+        # Performance parameters
+        self.declare_parameter(
+            'publish_rate', 
+            10.0,
+            ParameterDescriptor(
+                description='Rate at which to publish costmap layers (Hz)',
+                floating_point_range=[FloatingPointRange(
+                    from_value=1.0, 
+                    to_value=30.0, 
+                    step=1.0
+                )]
+            )
+        )
+        
+        # Feature flags
+        self.declare_parameter('temporal_filtering', True)
+        self.declare_parameter('motion_prediction', True)
+        self.declare_parameter('enable_3d_visualization', True)
+        self.declare_parameter('enable_text_labels', True)
+        
+        # Classification parameters
+        self.declare_parameter(
+            'min_confidence', 
+            0.5,
+            ParameterDescriptor(
+                description='Minimum confidence for classification',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.0, 
+                    to_value=1.0, 
+                    step=0.05
+                )]
+            )
+        )
+        
+        self.declare_parameter(
+            'decay_time', 
+            1.0,
+            ParameterDescriptor(
+                description='Base time for cell decay in seconds',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.1, 
+                    to_value=10.0, 
+                    step=0.1
+                )]
+            )
+        )
+        
+        # Add new classification parameters
+        self.declare_parameter(
+            'ground_height_threshold', 
+            0.3,
+            ParameterDescriptor(
+                description='Maximum height for ground classification (m)',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.1, 
+                    to_value=1.0, 
+                    step=0.05
+                )]
+            )
+        )
+        
+        self.declare_parameter(
+            'vegetation_height_ratio', 
+            3.0,
+            ParameterDescriptor(
+                description='Height to width ratio for vegetation classification',
+                floating_point_range=[FloatingPointRange(
+                    from_value=1.0, 
+                    to_value=10.0, 
+                    step=0.5
+                )]
+            )
+        )
+        
+        self.declare_parameter(
+            'building_width_threshold', 
+            5.0,
+            ParameterDescriptor(
+                description='Minimum width for building classification (m)',
+                floating_point_range=[FloatingPointRange(
+                    from_value=2.0, 
+                    to_value=20.0, 
+                    step=0.5
+                )]
+            )
+        )
+        
+        self.declare_parameter(
+            'dynamic_velocity_threshold', 
+            0.5,
+            ParameterDescriptor(
+                description='Minimum velocity for dynamic classification (m/s)',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.1, 
+                    to_value=10.0, 
+                    step=0.1
+                )]
+            )
+        )
+        
+        # Layer weight parameters
+        self.declare_parameter(
+            'ground_weight', 
+            0.1,
+            ParameterDescriptor(
+                description='Weight of ground layer in combined map',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.0, 
+                    to_value=10.0,
+                    step=0.1
+                )]
+            )
+        )
+        
+        self.declare_parameter(
+            'obstacle_weight', 
+            1.0,
+            ParameterDescriptor(
+                description='Weight of obstacle layer in combined map',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.0, 
+                    to_value=10.0,
+                    step=0.1
+                )]
+            )
+        )
+        
+        self.declare_parameter(
+            'vegetation_weight', 
+            0.7,
+            ParameterDescriptor(
+                description='Weight of vegetation layer in combined map',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.0, 
+                    to_value=10.0,
+                    step=0.1
+                )]
+            )
+        )
+        
+        self.declare_parameter(
+            'building_weight', 
+            0.9,
+            ParameterDescriptor(
+                description='Weight of building layer in combined map',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.0, 
+                    to_value=10.0,
+                    step=0.1
+                )]
+            )
+        )
+        
+        self.declare_parameter(
+            'dynamic_weight', 
+            1.0,
+            ParameterDescriptor(
+                description='Weight of dynamic layer in combined map',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.0, 
+                    to_value=10.0,
+                    step=0.1
+                )]
+            )
+        )
+    
+    def parameters_callback(self, params):
+        """Callback for parameter changes"""
+        result = SetParametersResult()
+        result.successful = True
+        
+        map_changed = False
+        weights_changed = False
+        
+        for param in params:
+            if param.name == 'map_resolution' or \
+               param.name == 'map_width_meters' or \
+               param.name == 'map_height_meters':
+                map_changed = True
+            
+            if param.name == 'publish_rate' and param.value != self.publish_rate:
+                # Update publish timer
+                self.publish_rate = param.value
+                self.publish_timer.cancel()
+                self.publish_timer = self.create_timer(
+                    1.0 / self.publish_rate,
+                    self.publish_costmap_layers
+                )
+                self.get_logger().info(f'Updated publish rate to {self.publish_rate} Hz')
+            
+            if param.name == 'temporal_filtering' and param.value != self.temporal_filtering:
+                self.temporal_filtering = param.value
+                if self.temporal_filtering and not hasattr(self, 'filtering_timer'):
+                    self.filtering_timer = self.create_timer(
+                        0.1,  # 10 Hz
+                        self.apply_temporal_filtering
+                    )
+                elif not self.temporal_filtering and hasattr(self, 'filtering_timer'):
+                    self.filtering_timer.cancel()
+                    delattr(self, 'filtering_timer')
+                self.get_logger().info(f'Temporal filtering set to {self.temporal_filtering}')
+            
+            if param.name == 'ground_height_threshold':
+                self.ground_height_threshold = param.value
+            
+            if param.name == 'vegetation_height_ratio':
+                self.vegetation_height_ratio = param.value
+            
+            if param.name == 'building_width_threshold':
+                self.building_width_threshold = param.value
+            
+            if param.name == 'dynamic_velocity_threshold':
+                self.dynamic_velocity_threshold = param.value
+            
+            if param.name.endswith('_weight'):
+                weights_changed = True
+        
+        # If map dimensions changed, reinitialize the costmap
+        if map_changed:
+            with self.costmap_lock:
+                self.map_resolution = self.get_parameter('map_resolution').value
+                self.map_width_meters = self.get_parameter('map_width_meters').value
+                self.map_height_meters = self.get_parameter('map_height_meters').value
+                
+                self.map_width = int(self.map_width_meters / self.map_resolution)
+                self.map_height = int(self.map_height_meters / self.map_resolution)
+                self.map_origin_x = -self.map_width_meters / 2.0
+                self.map_origin_y = -self.map_height_meters / 2.0
+                
+                self.initialize_costmap()
+                self.height_map = np.zeros((self.map_height, self.map_width), dtype=np.float32)
+                
+                self.get_logger().info(f'Map dimensions updated: {self.map_width}x{self.map_height} cells')
+                self.get_logger().info(f'Map resolution updated: {self.map_resolution} meters/cell')
+        
+        # If layer weights changed, update them
+        if weights_changed:
+            with self.costmap_lock:
+                self.layer_weights = {
+                    'ground': self.get_parameter('ground_weight').value if self.has_parameter('ground_weight') else 0.1,
+                    'obstacle': self.get_parameter('obstacle_weight').value if self.has_parameter('obstacle_weight') else 1.0,
+                    'vegetation': self.get_parameter('vegetation_weight').value if self.has_parameter('vegetation_weight') else 0.7,
+                    'building': self.get_parameter('building_weight').value if self.has_parameter('building_weight') else 0.9,
+                    'dynamic': self.get_parameter('dynamic_weight').value if self.has_parameter('dynamic_weight') else 1.0
+                }
+                self.get_logger().info('Layer weights updated')
+        
+        return result
+    
     def initialize_costmap(self):
         """Initialize the multi-layer costmap"""
         self.layers = {
@@ -195,11 +491,11 @@ class SemanticCostmapVisualizer(Node):
         
         # Layer weights for combining into final costmap
         self.layer_weights = {
-            'ground': 0.1,
-            'obstacle': 1.0,
-            'vegetation': 0.7,
-            'building': 0.9,
-            'dynamic': 1.0
+            'ground': self.get_parameter('ground_weight').value if self.has_parameter('ground_weight') else 0.1,
+            'obstacle': self.get_parameter('obstacle_weight').value if self.has_parameter('obstacle_weight') else 1.0,
+            'vegetation': self.get_parameter('vegetation_weight').value if self.has_parameter('vegetation_weight') else 0.7,
+            'building': self.get_parameter('building_weight').value if self.has_parameter('building_weight') else 0.9,
+            'dynamic': self.get_parameter('dynamic_weight').value if self.has_parameter('dynamic_weight') else 1.0
         }
         
         # Confidence values for each cell
@@ -315,17 +611,25 @@ class SemanticCostmapVisualizer(Node):
         # Extract cluster features
         height = cluster['max_z'] - cluster['min_z']
         width = max(cluster['dimensions'][0], cluster['dimensions'][1])
+        length = cluster['dimensions'][0]  # Assuming x is the forward direction
         height_ratio = height / width if width > 0 else 0
         
-        # Simple classification logic
-        if height < 0.3:
-            return 'ground'
-        elif height_ratio > 3.0:
-            return 'vegetation'
-        elif width > 5.0 and height > 2.0:
-            return 'building'
-        elif cluster['velocity'] > 0.5:
+        # Check for velocity first - moving objects are likely vehicles
+        if cluster['velocity'] > self.dynamic_velocity_threshold:
             return 'dynamic'
+            
+        # Car detection based on typical dimensions
+        # Most cars are 1.5-2m high, 1.7-2m wide, and 4-5m long
+        if 1.0 <= height <= 2.5 and 1.5 <= width <= 2.5 and 2.0 <= length <= 6.0:
+            return 'dynamic'  # Classify as dynamic even if stationary for vehicles
+            
+        # Original classification logic
+        if height < self.ground_height_threshold:
+            return 'ground'
+        elif height_ratio > self.vegetation_height_ratio:
+            return 'vegetation'
+        elif width > self.building_width_threshold and height > 2.0:
+            return 'building'
         else:
             return 'obstacle'
     
@@ -539,7 +843,8 @@ class SemanticCostmapVisualizer(Node):
             'obstacle': {'color': [0.8, 0.2, 0.2, 0.9], 'height': 1.0},
             'vegetation': {'color': [0.0, 0.6, 0.0, 0.8], 'height': 1.5},
             'building': {'color': [0.6, 0.6, 0.6, 1.0], 'height': 2.5},
-            'dynamic': {'color': [1.0, 0.6, 0.0, 1.0], 'height': 1.2}
+            'dynamic': {'color': [1.0, 0.6, 0.0, 1.0], 'height': 1.2},
+            'vehicle': {'color': [1.0, 0.0, 1.0, 1.0], 'height': 1.8}  # Magenta for vehicles
         }
         
         # Process all clusters
@@ -547,13 +852,25 @@ class SemanticCostmapVisualizer(Node):
         all_clusters = self.lidar_clusters + self.radar_clusters
         
         for cluster in all_clusters:
+            # Check if cluster is a vehicle based on dimensions
+            is_vehicle = False
+            height = cluster['max_z'] - cluster['min_z']
+            width = max(cluster['dimensions'][0], cluster['dimensions'][1])
+            length = max(cluster['dimensions'])
+            
+            # Vehicle detection based on typical dimensions
+            if 1.0 <= height <= 2.5 and 1.5 <= width <= 2.5 and 2.0 <= length <= 6.0:
+                is_vehicle = True
+            
             # Classify cluster
-            if cluster['source'] == 'radar':
+            if is_vehicle:
+                cluster_class = 'vehicle'
+            elif cluster['source'] == 'radar':
                 cluster_class = 'dynamic'
             else:
                 cluster_class = self.classify_cluster(cluster)
             
-            visual_props = semantic_classes[cluster_class]
+            visual_props = semantic_classes.get(cluster_class, semantic_classes['obstacle'])
             
             # Create cube marker for the cluster
             marker = Marker()

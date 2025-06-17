@@ -42,6 +42,7 @@ setup(
             'imu_euler_visualizer_simple = ' + package_name + '.imu_euler_visualizer_simple:main',
             'tf_alignment_check = ' + package_name + '.tf_alignment_check:main',
             'semantic_costmap_visualizer = ' + package_name + '.semantic_costmap_visualizer:main',
+            'tune_semantic_costmap = ' + package_name + '.tune_semantic_costmap:main',
         ],
     },
 )

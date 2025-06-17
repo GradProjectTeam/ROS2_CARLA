@@ -198,7 +198,8 @@ class RadarObjectDetector(Node):
             static_objects = []
             
             for obj in objects:
-                if obj['avg_velocity'] > self.moving_velocity_threshold:
+                # Vehicles or objects with sufficient velocity are marked as moving
+                if obj.get('is_vehicle', False) or obj['avg_velocity'] > self.moving_velocity_threshold:
                     obj['type'] = 'moving'
                     moving_objects.append(obj)
                 elif obj['avg_velocity'] <= self.static_velocity_threshold:
@@ -229,7 +230,8 @@ class RadarObjectDetector(Node):
             self.publish_object_tracking()
             
             if self.verbose_logging:
-                self.get_logger().info(f'Detected {len(moving_objects)} moving and {len(static_objects)} static objects')
+                vehicle_count = sum(1 for obj in objects if obj.get('is_vehicle', False))
+                self.get_logger().info(f'Detected {len(moving_objects)} moving and {len(static_objects)} static objects, including {vehicle_count} vehicles')
                 
         except Exception as e:
             self.get_logger().error(f'Error in process_and_publish: {str(e)}')
@@ -322,25 +324,55 @@ class RadarObjectDetector(Node):
         z_min = min(p['z'] for p in cluster_points)
         z_max = max(p['z'] for p in cluster_points)
         
-        size_x = max(0.3, x_max - x_min)  # Minimum size of 0.3m
-        size_y = max(0.3, y_max - y_min)
-        size_z = max(0.3, z_max - z_min)
+        # Raw dimensions from point cloud
+        raw_size_x = max(0.1, x_max - x_min)
+        raw_size_y = max(0.1, y_max - y_min)
+        raw_size_z = max(0.1, z_max - z_min)
+        
+        # Check if dimensions are plausible for a car
+        # Most cars are around 4-5m long, 1.7-2m wide, 1.5-2m high
+        is_vehicle = False
+        if len(cluster_points) >= 3:  # Need enough points to make a good estimate
+            if (1.5 <= raw_size_x <= 6.0 and 1.5 <= raw_size_y <= 3.0) or \
+               (1.5 <= raw_size_y <= 6.0 and 1.5 <= raw_size_x <= 3.0):
+                is_vehicle = True
+        
+        # Set size - use vehicle dimensions if detected, otherwise ensure minimum size
+        if is_vehicle:
+            # Use typical vehicle dimensions - helps when only partial points are detected
+            # Choose the larger dimension as the length
+            if raw_size_x > raw_size_y:
+                size_x = max(raw_size_x, 4.0)  # Ensure minimum length
+                size_y = max(raw_size_y, 1.7)  # Ensure minimum width
+            else:
+                size_x = max(raw_size_x, 1.7)  # Ensure minimum width
+                size_y = max(raw_size_y, 4.0)  # Ensure minimum length
+            size_z = max(raw_size_z, 1.5)  # Ensure minimum height
+        else:
+            # Use minimum size for non-vehicle objects
+            size_x = max(0.3, raw_size_x)  # Minimum size of 0.3m
+            size_y = max(0.3, raw_size_y)
+            size_z = max(0.3, raw_size_z)
         
         # Calculate average velocity
-        velocities = [abs(p['velocity']) for p in cluster_points]
+        velocities = [abs(float(p['velocity'])) for p in cluster_points]
         avg_velocity = sum(velocities) / len(velocities)
         
+        # For vehicles, even low velocities are significant
+        if is_vehicle and 0.1 <= avg_velocity <= 0.5:
+            avg_velocity = max(avg_velocity, 0.5)  # Boost low velocities for vehicles
+        
         # Calculate velocity vector (simplified)
-        vx = 0
-        vy = 0
-        vz = 0
+        vx = 0.0
+        vy = 0.0
+        vz = 0.0
         
         for p in cluster_points:
             # This is a simplification - in reality, we'd need the actual velocity components
             # Here we're using the point position relative to center as a proxy for direction
-            dx = p['x'] - center_x
-            dy = p['y'] - center_y
-            dz = p['z'] - center_z
+            dx = float(p['x'] - center_x)
+            dy = float(p['y'] - center_y)
+            dz = float(p['z'] - center_z)
             
             # Normalize
             mag = math.sqrt(dx*dx + dy*dy + dz*dz)
@@ -350,9 +382,10 @@ class RadarObjectDetector(Node):
                 dz /= mag
                 
             # Apply velocity magnitude
-            vx += dx * p['velocity']
-            vy += dy * p['velocity']
-            vz += dz * p['velocity']
+            velocity = float(p['velocity'])
+            vx += dx * velocity
+            vy += dy * velocity
+            vz += dz * velocity
         
         # Average velocity vector
         if len(cluster_points) > 0:
@@ -362,13 +395,14 @@ class RadarObjectDetector(Node):
         
         # Create object
         obj = {
-            'center': {'x': center_x, 'y': center_y, 'z': center_z},
-            'size': {'x': size_x, 'y': size_y, 'z': size_z},
-            'avg_velocity': avg_velocity,
-            'velocity_vector': {'x': vx, 'y': vy, 'z': vz},
+            'center': {'x': float(center_x), 'y': float(center_y), 'z': float(center_z)},
+            'size': {'x': float(size_x), 'y': float(size_y), 'z': float(size_z)},
+            'avg_velocity': float(avg_velocity),
+            'velocity_vector': {'x': float(vx), 'y': float(vy), 'z': float(vz)},
             'num_points': len(cluster_points),
             'timestamp': time.time(),
-            'points': cluster_points
+            'points': cluster_points,
+            'is_vehicle': is_vehicle  # Add vehicle flag
         }
         
         return obj
@@ -465,17 +499,17 @@ class RadarObjectDetector(Node):
             marker.action = Marker.ADD
             
             # Set position
-            marker.pose.position.x = obj['center']['x']
-            marker.pose.position.y = obj['center']['y']
-            marker.pose.position.z = obj['center']['z']
+            marker.pose.position.x = float(obj['center']['x'])
+            marker.pose.position.y = float(obj['center']['y'])
+            marker.pose.position.z = float(obj['center']['z'])
             
             # Set orientation (identity quaternion)
             marker.pose.orientation.w = 1.0
             
             # Set scale
-            marker.scale.x = obj['size']['x']
-            marker.scale.y = obj['size']['y']
-            marker.scale.z = obj['size']['z']
+            marker.scale.x = float(obj['size']['x'])
+            marker.scale.y = float(obj['size']['y'])
+            marker.scale.z = float(obj['size']['z'])
             
             # Set color (red for moving objects)
             marker.color = self.moving_object_color
@@ -497,14 +531,14 @@ class RadarObjectDetector(Node):
                 arrow.action = Marker.ADD
                 
                 # Start point at object center
-                start = Point(x=obj['center']['x'], y=obj['center']['y'], z=obj['center']['z'])
+                start = Point(x=float(obj['center']['x']), y=float(obj['center']['y']), z=float(obj['center']['z']))
                 
                 # End point based on velocity vector
-                scale = min(5.0, max(0.5, obj['avg_velocity']))  # Scale arrow by velocity
+                scale = min(5.0, max(0.5, float(obj['avg_velocity'])))  # Scale arrow by velocity
                 end = Point(
-                    x=obj['center']['x'] + obj['velocity_vector']['x'] * scale,
-                    y=obj['center']['y'] + obj['velocity_vector']['y'] * scale,
-                    z=obj['center']['z'] + obj['velocity_vector']['z'] * scale
+                    x=float(obj['center']['x'] + obj['velocity_vector']['x'] * scale),
+                    y=float(obj['center']['y'] + obj['velocity_vector']['y'] * scale),
+                    z=float(obj['center']['z'] + obj['velocity_vector']['z'] * scale)
                 )
                 
                 arrow.points.append(start)
@@ -544,17 +578,17 @@ class RadarObjectDetector(Node):
             marker.action = Marker.ADD
             
             # Set position
-            marker.pose.position.x = obj['center']['x']
-            marker.pose.position.y = obj['center']['y']
-            marker.pose.position.z = obj['center']['z']
+            marker.pose.position.x = float(obj['center']['x'])
+            marker.pose.position.y = float(obj['center']['y'])
+            marker.pose.position.z = float(obj['center']['z'])
             
             # Set orientation (identity quaternion)
             marker.pose.orientation.w = 1.0
             
             # Set scale
-            marker.scale.x = obj['size']['x']
-            marker.scale.y = obj['size']['y']
-            marker.scale.z = obj['size']['z']
+            marker.scale.x = float(obj['size']['x'])
+            marker.scale.y = float(obj['size']['y'])
+            marker.scale.z = float(obj['size']['z'])
             
             # Set color (blue for static objects)
             marker.color = self.static_object_color
@@ -588,9 +622,9 @@ class RadarObjectDetector(Node):
             marker.action = Marker.ADD
             
             # Set position (slightly above object)
-            marker.pose.position.x = obj['center']['x']
-            marker.pose.position.y = obj['center']['y']
-            marker.pose.position.z = obj['center']['z'] + obj['size']['z'] / 2 + 0.3
+            marker.pose.position.x = float(obj['center']['x'])
+            marker.pose.position.y = float(obj['center']['y'])
+            marker.pose.position.z = float(obj['center']['z'] + obj['size']['z'] / 2 + 0.3)
             
             # Set orientation (identity quaternion)
             marker.pose.orientation.w = 1.0
@@ -606,7 +640,7 @@ class RadarObjectDetector(Node):
             
             # Set text
             v_type = "Moving" if obj['type'] == 'moving' else "Static"
-            v_speed = f"{obj['avg_velocity']:.1f} m/s"
+            v_speed = f"{float(obj['avg_velocity']):.1f} m/s"
             marker.text = f"ID: {obj_id}\n{v_type}\n{v_speed}"
             
             # Set lifetime
