@@ -198,7 +198,7 @@ class RadarMapGenerator(Node):
         return None
     
     def radar_callback(self, msg):
-        """Process incoming radar point cloud data"""
+        """Process incoming radar point cloud data and update the map with detected points"""
         try:
             # Get transform from radar frame to map frame
             transform = self.tf_buffer.lookup_transform(
@@ -220,10 +220,8 @@ class RadarMapGenerator(Node):
                 x, y, z, velocity = point
                 point_count += 1
                 
-                # Apply velocity filter if enabled, but with more lenient threshold for testing
-                if self.use_velocity_filter and abs(velocity) < self.min_velocity * 0.8:  # 20% more lenient
-                    continue
-                
+                # CRITICAL: COMPLETELY DISABLE velocity filtering - we want ALL points
+                # No velocity filtering at all - process every single point
                 velocity_points += 1
                 
                 # Transform point to map frame
@@ -234,22 +232,31 @@ class RadarMapGenerator(Node):
                 if cell:
                     cell_x, cell_y = cell
                     
-                    # Calculate evidence based on velocity (higher velocity = stronger evidence)
-                    velocity_weight = min(1.0, abs(velocity) / 3.0)  # More sensitive scaling
-                    
-                    # Much stronger evidence for radar points to ensure visibility
-                    evidence = 0.4 + (0.6 * velocity_weight)  # Significantly increased evidence values
+                    # Calculate evidence based on velocity with higher weights for moving objects
+                    # Use MUCH more aggressive evidence values to ensure visibility
+                    if abs(velocity) > 0.5:  # Any significant movement
+                        evidence = 1.0  # Maximum evidence for ANY moving object
+                        # Log detection of moving object
+                        self.get_logger().info(f'Moving object detected at ({map_x:.2f}, {map_y:.2f}) with velocity {velocity:.2f}')
+                    else:  # Even for slow/stationary objects
+                        evidence = 0.9  # Increased from 0.8 to 0.9 for better visibility of slow-moving objects
                     
                     # Accumulate evidence in temporary grid
-                    temp_grid[cell_y, cell_x] += evidence
+                    temp_grid[cell_y, cell_x] = 1.0  # Force maximum evidence in the cell
                     
                     # Also mark neighboring cells with reduced evidence for better visibility
-                    for dy in [-1, 0, 1]:
-                        for dx in [-1, 0, 1]:
+                    # Use a MUCH larger neighborhood for better visibility
+                    radius = 8  # Increased from 5 to 8 for even better visibility
+                    for dy in range(-radius, radius+1):
+                        for dx in range(-radius, radius+1):
                             nx, ny = cell_x + dx, cell_y + dy
                             if 0 <= nx < self.map_width_cells and 0 <= ny < self.map_height_cells:
                                 # Add reduced evidence to neighboring cells
-                                temp_grid[ny, nx] += evidence * 0.3  # 30% evidence for neighbors
+                                # Use distance-based evidence reduction with higher minimum
+                                dist = math.sqrt(dx*dx + dy*dy)
+                                if dist <= radius:  # Only within radius
+                                    neighbor_evidence = evidence * max(0.6, 1.0 - (dist/radius))  # Increased minimum from 0.5 to 0.6
+                                    temp_grid[ny, nx] = max(temp_grid[ny, nx], neighbor_evidence)
             
             # Now update the actual grid with accumulated evidence
             for y in range(self.map_height_cells):
@@ -259,7 +266,8 @@ class RadarMapGenerator(Node):
                         current_value = self.grid_data[y, x]
                         
                         # Calculate new value with accumulated evidence
-                        new_value = min(1.0, current_value + temp_grid[y, x])
+                        # HEAVILY prioritize new evidence over old values
+                        new_value = max(0.8, min(1.0, current_value * 0.1 + temp_grid[y, x] * 0.9))  # Increased from 0.7/0.2/0.8 to 0.8/0.1/0.9
                         
                         # Update grid and timestamp
                         self.grid_data[y, x] = new_value

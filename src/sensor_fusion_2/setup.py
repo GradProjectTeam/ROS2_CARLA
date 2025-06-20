@@ -43,6 +43,7 @@ setup(
             'tf_alignment_check = ' + package_name + '.tf_alignment_check:main',
             'semantic_costmap_visualizer = ' + package_name + '.semantic_costmap_visualizer:main',
             'tune_semantic_costmap = ' + package_name + '.tune_semantic_costmap:main',
+            'autonomous_dwa_planner = ' + package_name + '.autonomous_dwa_planner:main',
         ],
     },
 )

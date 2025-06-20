@@ -1,0 +1,72 @@
+def update_layer_from_cluster(self, cluster, cluster_class):
+        """Update costmap layer from a classified cluster"""
+        # Get cluster bounds in grid coordinates
+        min_x, min_y = self.world_to_map(cluster['min_x'], cluster['min_y'])
+        max_x, max_y = self.world_to_map(cluster['max_x'], cluster['max_y'])
+        
+        if min_x is None or min_y is None or max_x is None or max_y is None:
+            return
+        
+        # Set cost in appropriate layer
+        # Increase cost for radar-detected objects and dynamic objects
+        base_cost = int(min(100, cluster['confidence'] * 100))
+        
+        # Special handling for cars and radar objects
+        is_car = cluster.get('is_car', False)
+        is_radar = cluster.get('source') == 'radar'
+        
+        # Set cost based on object type
+        if is_car:
+            # Cars get absolute maximum priority
+            cost = 100  # Maximum possible cost
+            self.get_logger().info(f'Setting maximum cost (100) for car object at ({cluster["centroid"][0]:.2f}, {cluster["centroid"][1]:.2f})')
+        elif is_radar:
+            # Radar objects get a significant boost
+            cost = min(100, base_cost + 60)  # Increased from +50 to +60 for better visibility
+            if cluster_class == 'dynamic':
+                # Dynamic radar objects get very high priority
+                cost = min(100, base_cost + 80)  # Increased from +70 to +80
+                # Log the radar dynamic object for debugging
+                self.get_logger().info(f'Radar dynamic object detected: position=({cluster["centroid"][0]:.2f}, {cluster["centroid"][1]:.2f}), velocity={cluster.get("velocity", 0):.2f}')
+        else:
+            cost = base_cost
+            
+        current_time = time.time()
+        
+        # Create a larger area of influence for dynamic objects and cars
+        radius_boost = 1
+        if is_car:
+            # Significantly larger area for cars to ensure visibility
+            radius_boost = 7  # Increased from 5 to 7 for better visibility of small cars
+            # Add special logging for car detection
+            height = cluster['max_z'] - cluster['min_z'] if 'max_z' in cluster and 'min_z' in cluster else 0
+            self.get_logger().info(f'Car detected with height {height:.2f}m - using large radius_boost={radius_boost}')
+        elif cluster_class == 'dynamic':
+            radius_boost = 5  # Increased from 4 to 5 for better visibility
+            
+        # Expand the object's footprint
+        for y in range(min_y - radius_boost, max_y + radius_boost + 1):
+            for x in range(min_x - radius_boost, max_x + radius_boost + 1):
+                if 0 <= x < self.map_width and 0 <= y < self.map_height:
+                    # For points outside the original bounds, reduce cost based on distance
+                    if min_x <= x <= max_x and min_y <= y <= max_y:
+                        cell_cost = cost
+                    else:
+                        # Calculate distance from cluster bounds
+                        dx = max(0, min_x - x, x - max_x)
+                        dy = max(0, min_y - y, y - max_y)
+                        distance = math.sqrt(dx*dx + dy*dy)
+                        # Reduce cost based on distance, but keep a higher minimum for radar dynamic objects
+                        min_cost_factor = 0.3  # Default minimum cost factor
+                        if is_car:
+                            min_cost_factor = 0.8  # Increased from 0.7 to 0.8 for better visibility of small cars
+                        elif is_radar and cluster_class == 'dynamic':
+                            min_cost_factor = 0.7  # Increased from 0.6 to 0.7 for better visibility
+                        cell_cost = int(cost * max(min_cost_factor, 1.0 - distance/radius_boost))
+                    
+                    # Update layer with maximum cost
+                    self.layers[cluster_class][y, x] = max(self.layers[cluster_class][y, x], cell_cost)
+                    
+                    # Update confidence and timestamp
+                    self.confidence_map[y, x] = max(self.confidence_map[y, x], cluster['confidence'])
+                    self.cell_update_time[y, x] = current_time 

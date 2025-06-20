@@ -17,6 +17,8 @@ from tf2_ros.transform_listener import TransformListener
 from std_srvs.srv import SetBool
 from rcl_interfaces.msg import ParameterDescriptor, FloatingPointRange, IntegerRange, SetParametersResult
 from rcl_interfaces.srv import GetParameters, SetParameters, ListParameters
+import os
+from datetime import datetime
 
 class SemanticCostmapVisualizer(Node):
     """
@@ -28,6 +30,7 @@ class SemanticCostmapVisualizer(Node):
     3. Creates separate costmap layers for each semantic category
     4. Provides interactive visualization with layer toggling
     5. Integrates with RViz for enhanced visualization
+    6. Produces a binary (black/white) map output for navigation planning
     """
     def __init__(self):
         super().__init__('semantic_costmap_visualizer')
@@ -49,6 +52,7 @@ class SemanticCostmapVisualizer(Node):
         self.motion_prediction = self.get_parameter('motion_prediction').value
         self.min_confidence = self.get_parameter('min_confidence').value
         self.decay_time = self.get_parameter('decay_time').value
+        self.dynamic_decay_time = self.get_parameter('dynamic_decay_time').value
         self.enable_3d_visualization = self.get_parameter('enable_3d_visualization').value
         self.enable_text_labels = self.get_parameter('enable_text_labels').value
         
@@ -57,6 +61,32 @@ class SemanticCostmapVisualizer(Node):
         self.vegetation_height_ratio = self.get_parameter('vegetation_height_ratio').value
         self.building_width_threshold = self.get_parameter('building_width_threshold').value
         self.dynamic_velocity_threshold = self.get_parameter('dynamic_velocity_threshold').value
+        
+        # Add binary map parameters
+        self.enable_binary_output = self.get_parameter('enable_binary_output').value
+        self.binary_topic = self.get_parameter('binary_topic').value
+        self.occupied_value = self.get_parameter('occupied_value').value
+        self.free_value = self.get_parameter('free_value').value
+        self.binary_threshold = self.get_parameter('binary_threshold').value
+        self.convert_vegetation_to_occupied = self.get_parameter('convert_vegetation_to_occupied').value
+        self.convert_all_non_ground_to_occupied = self.get_parameter('convert_all_non_ground_to_occupied').value
+        
+        # Add marker lifetime parameter
+        self.marker_lifetime = self.get_parameter('marker_lifetime').value
+        
+        # Map saving parameters
+        self.enable_map_saving = self.get_parameter('enable_map_saving').value
+        self.save_directory = self.get_parameter('save_directory').value
+        self.save_interval = self.get_parameter('save_interval').value
+        self.save_binary_map = self.get_parameter('save_binary_map').value
+        self.save_combined_map = self.get_parameter('save_combined_map').value
+        self.save_layer_maps = self.get_parameter('save_layer_maps').value
+        self.last_save_time = time.time()
+        
+        # Create save directory if it doesn't exist
+        if self.enable_map_saving:
+            os.makedirs(self.save_directory, exist_ok=True)
+            self.get_logger().info(f'Map saving enabled. Maps will be saved to {self.save_directory}')
         
         # Add parameter callback
         self.add_on_set_parameters_callback(self.parameters_callback)
@@ -117,6 +147,16 @@ class SemanticCostmapVisualizer(Node):
                 10
             )
         
+        # Create publisher for binary map
+        if self.enable_binary_output:
+            self.binary_map_pub = self.create_publisher(
+                OccupancyGrid,
+                self.binary_topic,
+                map_qos
+            )
+            self.get_logger().info(f'Binary map will be published on {self.binary_topic}')
+            self.get_logger().info(f'Binary threshold: {self.binary_threshold}, Occupied value: {self.occupied_value}, Free value: {self.free_value}')
+        
         # Create subscribers
         self.lidar_points_sub = self.create_subscription(
             PointCloud2,
@@ -153,6 +193,13 @@ class SemanticCostmapVisualizer(Node):
             self.toggle_layer_callback
         )
         
+        # Create service for saving maps on demand
+        self.save_maps_srv = self.create_service(
+            SetBool,
+            '/semantic_costmap/save_maps',
+            self.save_maps_callback
+        )
+        
         # Create timers
         self.publish_timer = self.create_timer(
             1.0 / self.publish_rate,
@@ -160,10 +207,19 @@ class SemanticCostmapVisualizer(Node):
         )
         
         if self.temporal_filtering:
+            # Use a more reasonable frequency (20 Hz) for temporal filtering to balance responsiveness and stability
             self.filtering_timer = self.create_timer(
-                0.1,  # 10 Hz
+                0.05,  # 20 Hz - reduced from 50 Hz for more stable behavior
                 self.apply_temporal_filtering
             )
+        
+        # Create save timer if enabled
+        if self.enable_map_saving:
+            self.save_timer = self.create_timer(
+                self.save_interval,
+                self.save_maps
+            )
+            self.get_logger().info(f'Maps will be saved every {self.save_interval} seconds')
         
         # Data storage
         self.lidar_clusters = []
@@ -177,7 +233,8 @@ class SemanticCostmapVisualizer(Node):
         
         self.get_logger().info('Semantic Costmap Visualizer initialized')
         self.get_logger().info(f'Map dimensions: {self.map_width}x{self.map_height} cells')
-        self.get_logger().info(f'Map resolution: {self.map_resolution} meters/cell')
+        self.get_logger().info(f'Using balanced decay settings: decay_time={self.decay_time}s, dynamic_decay_time={self.dynamic_decay_time}s')
+        self.get_logger().info(f'Temporal filtering running at 20 Hz to balance responsiveness and stability')
     
     def add_dynamic_parameters(self):
         """Add parameters with descriptors for dynamic reconfigure"""
@@ -237,7 +294,7 @@ class SemanticCostmapVisualizer(Node):
                 description='Rate at which to publish costmap layers (Hz)',
                 floating_point_range=[FloatingPointRange(
                     from_value=1.0, 
-                    to_value=30.0, 
+                    to_value=100.0,  # Changed from 30.0 to 100.0 to support ultra-fast publishing
                     step=1.0
                 )]
             )
@@ -265,13 +322,41 @@ class SemanticCostmapVisualizer(Node):
         
         self.declare_parameter(
             'decay_time', 
-            1.0,
+            0.01,  # Ultra-fast decay (default was 0.05)
             ParameterDescriptor(
                 description='Base time for cell decay in seconds',
                 floating_point_range=[FloatingPointRange(
-                    from_value=0.1, 
-                    to_value=10.0, 
-                    step=0.1
+                    from_value=0.001,  # Changed lower bound for ultra-fast decay
+                    to_value=10.0,
+                    step=0.001
+                )]
+            )
+        )
+        
+        # Add dynamic decay time parameter
+        self.declare_parameter(
+            'dynamic_decay_time', 
+            0.005,  # Ultra-fast decay for dynamic objects (default was 0.02)
+            ParameterDescriptor(
+                description='Decay time specifically for dynamic objects in seconds',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.001,  # Changed lower bound for ultra-fast decay
+                    to_value=5.0,
+                    step=0.001
+                )]
+            )
+        )
+        
+        # Add marker lifetime parameter
+        self.declare_parameter(
+            'marker_lifetime', 
+            0.01,  # Ultra-fast marker lifetime
+            ParameterDescriptor(
+                description='Lifetime of visualization markers in seconds',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.001,
+                    to_value=5.0,
+                    step=0.001
                 )]
             )
         )
@@ -394,6 +479,132 @@ class SemanticCostmapVisualizer(Node):
                 )]
             )
         )
+        
+        # Binary map parameters
+        self.declare_parameter(
+            'enable_binary_output',
+            True,
+            ParameterDescriptor(
+                description='Enable binary (black/white) output map for navigation'
+            )
+        )
+        
+        self.declare_parameter(
+            'binary_topic',
+            '/semantic_costmap/binary',
+            ParameterDescriptor(
+                description='Topic name for publishing binary obstacle map'
+            )
+        )
+        
+        self.declare_parameter(
+            'occupied_value',
+            100,
+            ParameterDescriptor(
+                description='Value for occupied cells in binary map (black)',
+                integer_range=[IntegerRange(
+                    from_value=1, 
+                    to_value=100, 
+                    step=1
+                )]
+            )
+        )
+        
+        self.declare_parameter(
+            'free_value',
+            0,
+            ParameterDescriptor(
+                description='Value for free cells in binary map (white/transparent)',
+                integer_range=[IntegerRange(
+                    from_value=0, 
+                    to_value=99, 
+                    step=1
+                )]
+            )
+        )
+        
+        self.declare_parameter(
+            'binary_threshold',
+            0.1,
+            ParameterDescriptor(
+                description='Threshold value for binary obstacle classification',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.01, 
+                    to_value=1.0, 
+                    step=0.01
+                )]
+            )
+        )
+        
+        self.declare_parameter(
+            'convert_vegetation_to_occupied',
+            True,
+            ParameterDescriptor(
+                description='Convert vegetation cells to occupied in binary map'
+            )
+        )
+        
+        self.declare_parameter(
+            'convert_all_non_ground_to_occupied',
+            True,
+            ParameterDescriptor(
+                description='Convert all non-ground objects to occupied in binary map'
+            )
+        )
+        
+        # Add map saving parameters
+        self.declare_parameter(
+            'enable_map_saving',
+            False,
+            ParameterDescriptor(
+                description='Enable saving maps to local files'
+            )
+        )
+        
+        self.declare_parameter(
+            'save_directory',
+            '/home/mostafa/GP/ROS2/maps/NewMaps',
+            ParameterDescriptor(
+                description='Directory to save map files'
+            )
+        )
+        
+        self.declare_parameter(
+            'save_interval',
+            3.0,
+            ParameterDescriptor(
+                description='Interval in seconds between map saves',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.0, 
+                    to_value=3600.0, 
+                    step=5.0
+                )]
+            )
+        )
+        
+        self.declare_parameter(
+            'save_binary_map',
+            True,
+            ParameterDescriptor(
+                description='Save the binary map'
+            )
+        )
+        
+        self.declare_parameter(
+            'save_combined_map',
+            True,
+            ParameterDescriptor(
+                description='Save the combined map'
+            )
+        )
+        
+        self.declare_parameter(
+            'save_layer_maps',
+            False,
+            ParameterDescriptor(
+                description='Save individual layer maps'
+            )
+        )
     
     def parameters_callback(self, params):
         """Callback for parameter changes"""
@@ -422,8 +633,9 @@ class SemanticCostmapVisualizer(Node):
             if param.name == 'temporal_filtering' and param.value != self.temporal_filtering:
                 self.temporal_filtering = param.value
                 if self.temporal_filtering and not hasattr(self, 'filtering_timer'):
+                    # Use balanced frequency for more stable behavior
                     self.filtering_timer = self.create_timer(
-                        0.1,  # 10 Hz
+                        0.05,  # 20 Hz - balanced for stability and responsiveness
                         self.apply_temporal_filtering
                     )
                 elif not self.temporal_filtering and hasattr(self, 'filtering_timer'):
@@ -443,8 +655,106 @@ class SemanticCostmapVisualizer(Node):
             if param.name == 'dynamic_velocity_threshold':
                 self.dynamic_velocity_threshold = param.value
             
+            # Add handling for decay time parameters
+            if param.name == 'decay_time':
+                self.decay_time = param.value
+                self.get_logger().info(f'Updated decay time to {self.decay_time:.3f}s')
+                
+            if param.name == 'dynamic_decay_time':
+                self.dynamic_decay_time = param.value
+                self.get_logger().info(f'Updated dynamic decay time to {self.dynamic_decay_time:.3f}s')
+                
+            # Add handling for marker lifetime parameter
+            if param.name == 'marker_lifetime':
+                self.marker_lifetime = param.value
+                self.get_logger().info(f'Updated marker lifetime to {self.marker_lifetime:.3f}s')
+            
             if param.name.endswith('_weight'):
                 weights_changed = True
+            
+            # Binary map parameters
+            if param.name == 'enable_binary_output':
+                self.enable_binary_output = param.value
+                if self.enable_binary_output and not hasattr(self, 'binary_map_pub'):
+                    map_qos = QoSProfile(
+                        reliability=QoSReliabilityPolicy.RELIABLE,
+                        history=QoSHistoryPolicy.KEEP_LAST,
+                        durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                        depth=1
+                    )
+                    self.binary_map_pub = self.create_publisher(
+                        OccupancyGrid,
+                        self.binary_topic,
+                        map_qos
+                    )
+                    self.get_logger().info(f'Created binary map publisher on {self.binary_topic}')
+            
+            if param.name == 'binary_topic':
+                self.binary_topic = param.value
+                if hasattr(self, 'binary_map_pub'):
+                    self.get_logger().warn(f'Binary map topic changed to {self.binary_topic}, but topic change requires restart to take effect')
+            
+            if param.name == 'occupied_value':
+                self.occupied_value = param.value
+                self.get_logger().info(f'Binary map occupied value set to {self.occupied_value}')
+            
+            if param.name == 'free_value':
+                self.free_value = param.value
+                self.get_logger().info(f'Binary map free value set to {self.free_value}')
+            
+            if param.name == 'binary_threshold':
+                self.binary_threshold = param.value
+                self.get_logger().info(f'Binary map threshold set to {self.binary_threshold}')
+            
+            if param.name == 'convert_vegetation_to_occupied':
+                self.convert_vegetation_to_occupied = param.value
+                self.get_logger().info(f'Converting vegetation to occupied: {self.convert_vegetation_to_occupied}')
+            
+            if param.name == 'convert_all_non_ground_to_occupied':
+                self.convert_all_non_ground_to_occupied = param.value
+                self.get_logger().info(f'Converting all non-ground to occupied: {self.convert_all_non_ground_to_occupied}')
+            
+            # Handle map saving parameters
+            if param.name == 'enable_map_saving':
+                self.enable_map_saving = param.value
+                if self.enable_map_saving:
+                    os.makedirs(self.save_directory, exist_ok=True)
+                    if not hasattr(self, 'save_timer'):
+                        self.save_timer = self.create_timer(
+                            self.save_interval,
+                            self.save_maps
+                        )
+                    self.get_logger().info(f'Map saving enabled. Maps will be saved to {self.save_directory}')
+                else:
+                    if hasattr(self, 'save_timer'):
+                        self.save_timer.cancel()
+                        delattr(self, 'save_timer')
+                    self.get_logger().info('Map saving disabled')
+            
+            if param.name == 'save_directory':
+                self.save_directory = param.value
+                if self.enable_map_saving:
+                    os.makedirs(self.save_directory, exist_ok=True)
+                    self.get_logger().info(f'Map save directory changed to {self.save_directory}')
+            
+            if param.name == 'save_interval':
+                self.save_interval = param.value
+                if self.enable_map_saving and hasattr(self, 'save_timer'):
+                    self.save_timer.cancel()
+                    self.save_timer = self.create_timer(
+                        self.save_interval,
+                        self.save_maps
+                    )
+                self.get_logger().info(f'Map save interval updated to {self.save_interval} seconds')
+                
+            if param.name == 'save_binary_map':
+                self.save_binary_map = param.value
+                
+            if param.name == 'save_combined_map':
+                self.save_combined_map = param.value
+                
+            if param.name == 'save_layer_maps':
+                self.save_layer_maps = param.value
         
         # If map dimensions changed, reinitialize the costmap
         if map_changed:
@@ -577,7 +887,7 @@ class SemanticCostmapVisualizer(Node):
     
     def radar_clusters_callback(self, msg):
         """Process radar cluster data"""
-        self.get_logger().debug(f'Received {len(msg.markers)} radar clusters')
+        self.get_logger().info(f'Received {len(msg.markers)} radar clusters')
         
         # Extract clusters from markers
         clusters = []
@@ -586,8 +896,40 @@ class SemanticCostmapVisualizer(Node):
                 cluster = self.extract_cluster_info(marker)
                 cluster['source'] = 'radar'
                 
-                # Radar clusters are likely dynamic objects
-                cluster['velocity'] = 1.0  # Assume some velocity for radar objects
+                # CRITICAL: Treat ALL radar detections as high-priority dynamic objects
+                # Set extremely high velocity to ensure they're classified as dynamic
+                cluster['velocity'] = 10.0  # Very high velocity to ensure dynamic classification
+                
+                # Set maximum confidence for all radar clusters
+                cluster['confidence'] = 1.0  # Maximum confidence
+                
+                # Check if object is car-sized (special handling for cars)
+                width = marker.scale.x
+                length = marker.scale.y
+                height = marker.scale.z
+                
+                # CRITICAL: More inclusive car detection - especially for lower cars
+                is_car = False
+                
+                # Check for car-like dimensions with more inclusive height range
+                # Standard car dimensions: width 1.5-2.5m, length 3.5-6.0m, height 1.0-2.0m
+                if (
+                    # Check for typical car dimensions (width/length)
+                    ((1.0 <= width <= 3.0 and 2.0 <= length <= 6.0) or 
+                     (1.0 <= length <= 3.0 and 2.0 <= width <= 6.0)) and
+                    # Allow for lower-profile cars (height can be as low as 0.5m for sports cars)
+                    height <= 2.5
+                ):
+                    is_car = True
+                    self.get_logger().info(f'CAR DETECTED: size=({width:.2f}x{length:.2f}x{height:.2f}), position=({cluster["centroid"][0]:.2f}, {cluster["centroid"][1]:.2f})')
+                
+                # SPECIAL CASE: For very small objects that might be low-profile cars
+                # If object is small but has significant velocity, treat as a car
+                elif max(width, length) >= 0.8 and height <= 1.0:
+                    is_car = True
+                    self.get_logger().info(f'LOW-PROFILE CAR DETECTED: size=({width:.2f}x{length:.2f}x{height:.2f}), position=({cluster["centroid"][0]:.2f}, {cluster["centroid"][1]:.2f})')
+                
+                cluster['is_car'] = is_car
                 clusters.append(cluster)
         
         # Update radar clusters
@@ -596,15 +938,18 @@ class SemanticCostmapVisualizer(Node):
             
             # Process each cluster
             for cluster in clusters:
-                # Radar clusters are typically dynamic objects
+                # All radar clusters are classified as dynamic objects
                 cluster_class = 'dynamic'
                 
-                # Update costmap layer
+                # Update costmap layer with higher priority
                 self.update_layer_from_cluster(cluster, cluster_class)
                 
                 # Track dynamic object
                 if self.motion_prediction:
                     self.track_dynamic_object(cluster)
+                    
+            # Log total number of dynamic objects being tracked
+            self.get_logger().info(f'Currently tracking {len(self.dynamic_objects)} dynamic objects')
     
     def classify_cluster(self, cluster):
         """Classify LiDAR cluster based on properties"""
@@ -616,12 +961,34 @@ class SemanticCostmapVisualizer(Node):
         
         # Check for velocity first - moving objects are likely vehicles
         if cluster['velocity'] > self.dynamic_velocity_threshold:
+            self.get_logger().info(f'Dynamic object detected based on velocity: {cluster["velocity"]:.2f} m/s')
             return 'dynamic'
             
-        # Car detection based on typical dimensions
+        # IMPROVED Car detection based on more inclusive dimensions
         # Most cars are 1.5-2m high, 1.7-2m wide, and 4-5m long
-        if 1.0 <= height <= 2.5 and 1.5 <= width <= 2.5 and 2.0 <= length <= 6.0:
+        # But we need to include lower-profile cars too
+        if (
+            # More inclusive height range to detect lower-profile cars
+            0.5 <= height <= 2.5 and 
+            # Standard car width range
+            1.5 <= width <= 3.0 and 
+            # Standard car length range
+            2.0 <= length <= 6.0
+        ):
+            self.get_logger().info(f'Car detected: h={height:.2f}m, w={width:.2f}m, l={length:.2f}m')
             return 'dynamic'  # Classify as dynamic even if stationary for vehicles
+            
+        # Special case for very low-profile sports cars
+        if (
+            # Ultra-low profile
+            0.3 <= height <= 1.5 and
+            # Standard car width
+            1.5 <= width <= 2.5 and
+            # Standard car length
+            3.0 <= length <= 5.0
+        ):
+            self.get_logger().info(f'Low-profile sports car detected: h={height:.2f}m, w={width:.2f}m, l={length:.2f}m')
+            return 'dynamic'
             
         # Original classification logic
         if height < self.ground_height_threshold:
@@ -643,17 +1010,68 @@ class SemanticCostmapVisualizer(Node):
             return
         
         # Set cost in appropriate layer
-        cost = int(min(100, cluster['confidence'] * 100))
+        # Increase cost for radar-detected objects and dynamic objects
+        base_cost = int(min(100, cluster['confidence'] * 100))
+        
+        # Special handling for cars and radar objects
+        is_car = cluster.get('is_car', False)
+        is_radar = cluster.get('source') == 'radar'
+        
+        # Set cost based on object type
+        if is_car:
+            # Cars get absolute maximum priority
+            cost = 100  # Maximum possible cost
+            self.get_logger().info(f'Setting maximum cost (100) for car object at ({cluster["centroid"][0]:.2f}, {cluster["centroid"][1]:.2f})')
+        elif is_radar:
+            # Radar objects get a significant boost
+            cost = min(100, base_cost + 60)  # Increased from +50 to +60 for better visibility
+            if cluster_class == 'dynamic':
+                # Dynamic radar objects get very high priority
+                cost = min(100, base_cost + 80)  # Increased from +70 to +80
+                # Log the radar dynamic object for debugging
+                self.get_logger().info(f'Radar dynamic object detected: position=({cluster["centroid"][0]:.2f}, {cluster["centroid"][1]:.2f}), velocity={cluster.get("velocity", 0):.2f}')
+        else:
+            cost = base_cost
+            
         current_time = time.time()
         
-        for y in range(min_y, max_y + 1):
-            for x in range(min_x, max_x + 1):
-                # Update layer with maximum cost
-                self.layers[cluster_class][y, x] = max(self.layers[cluster_class][y, x], cost)
-                
-                # Update confidence and timestamp
-                self.confidence_map[y, x] = max(self.confidence_map[y, x], cluster['confidence'])
-                self.cell_update_time[y, x] = current_time
+        # Create a larger area of influence for dynamic objects and cars
+        radius_boost = 1
+        if is_car:
+            # Significantly larger area for cars to ensure visibility
+            radius_boost = 7  # Increased from 5 to 7 for better visibility of small cars
+            # Add special logging for car detection
+            height = cluster['max_z'] - cluster['min_z'] if 'max_z' in cluster and 'min_z' in cluster else 0
+            self.get_logger().info(f'Car detected with height {height:.2f}m - using large radius_boost={radius_boost}')
+        elif cluster_class == 'dynamic':
+            radius_boost = 5  # Increased from 4 to 5 for better visibility
+            
+        # Expand the object's footprint
+        for y in range(min_y - radius_boost, max_y + radius_boost + 1):
+            for x in range(min_x - radius_boost, max_x + radius_boost + 1):
+                if 0 <= x < self.map_width and 0 <= y < self.map_height:
+                    # For points outside the original bounds, reduce cost based on distance
+                    if min_x <= x <= max_x and min_y <= y <= max_y:
+                        cell_cost = cost
+                    else:
+                        # Calculate distance from cluster bounds
+                        dx = max(0, min_x - x, x - max_x)
+                        dy = max(0, min_y - y, y - max_y)
+                        distance = math.sqrt(dx*dx + dy*dy)
+                        # Reduce cost based on distance, but keep a higher minimum for radar dynamic objects
+                        min_cost_factor = 0.3  # Default minimum cost factor
+                        if is_car:
+                            min_cost_factor = 0.8  # Increased from 0.7 to 0.8 for better visibility of small cars
+                        elif is_radar and cluster_class == 'dynamic':
+                            min_cost_factor = 0.7  # Increased from 0.6 to 0.7 for better visibility
+                        cell_cost = int(cost * max(min_cost_factor, 1.0 - distance/radius_boost))
+                    
+                    # Update layer with maximum cost
+                    self.layers[cluster_class][y, x] = max(self.layers[cluster_class][y, x], cell_cost)
+                    
+                    # Update confidence and timestamp
+                    self.confidence_map[y, x] = max(self.confidence_map[y, x], cluster['confidence'])
+                    self.cell_update_time[y, x] = current_time
     
     def update_height_map(self, cluster):
         """Update height map from cluster"""
@@ -716,24 +1134,32 @@ class SemanticCostmapVisualizer(Node):
         with self.costmap_lock:
             current_time = time.time()
             
-            # Apply different decay rates to different layers
+            # Calculate decay rates from decay time parameters
+            # decay_rate = exp(-time_diff/decay_time) gives proper exponential decay
+            # Lower decay_time means faster decay rate (closer to 0)
+            # Layer-specific decay rates based on decay_time and dynamic_decay_time parameters
+            time_diff = current_time - self.last_update_time
+            
+            # Calculate decay rates for each layer type
+            # decay_rate closer to 0 means faster decay
             decay_rates = {
-                'ground': 0.01,     # Slow decay for static features
-                'obstacle': 0.05,
-                'vegetation': 0.01,
-                'building': 0.005,  # Very slow decay for buildings
-                'dynamic': 0.2      # Fast decay for dynamic objects
+                'ground': math.exp(-time_diff / self.decay_time),
+                'obstacle': math.exp(-time_diff / self.decay_time),
+                'vegetation': math.exp(-time_diff / self.decay_time),
+                'building': math.exp(-time_diff / self.decay_time),
+                'dynamic': math.exp(-time_diff / self.dynamic_decay_time)  # Dynamic objects decay faster
             }
             
-            # Apply decay based on time since last update
-            time_diff = current_time - self.last_update_time
+            self.get_logger().debug(f'Temporal filtering: time_diff={time_diff:.3f}s, decay_time={self.decay_time:.3f}s, dynamic_decay_time={self.dynamic_decay_time:.3f}s')
+            self.get_logger().debug(f'Decay rates: ground={decay_rates["ground"]:.3f}, obstacle={decay_rates["obstacle"]:.3f}, dynamic={decay_rates["dynamic"]:.3f}')
+            
+            # Apply decay to each layer
             for layer_name, decay_rate in decay_rates.items():
-                # Calculate decay factor
-                decay_factor = 1.0 - (decay_rate * time_diff)
-                decay_factor = max(0.0, min(1.0, decay_factor))
+                # Ensure decay_rate is between 0 and 1
+                decay_rate = max(0.0, min(1.0, decay_rate))
                 
                 # Apply decay to entire layer
-                self.layers[layer_name] = (self.layers[layer_name] * decay_factor).astype(np.int8)
+                self.layers[layer_name] = (self.layers[layer_name] * decay_rate).astype(np.int8)
             
             # Update dynamic object positions based on tracked velocities
             if self.motion_prediction and self.dynamic_objects:
@@ -742,7 +1168,7 @@ class SemanticCostmapVisualizer(Node):
                 
                 for obj_id, obj_data in self.dynamic_objects.items():
                     # Skip old objects
-                    if current_time - obj_data['timestamp'] > self.decay_time:
+                    if current_time - obj_data['timestamp'] > self.dynamic_decay_time * 5:  # Use dynamic_decay_time parameter
                         continue
                         
                     # Predict new position based on velocity and time difference
@@ -755,7 +1181,7 @@ class SemanticCostmapVisualizer(Node):
                     
                     if grid_x is not None and grid_y is not None:
                         # Mark predicted position with slightly lower confidence
-                        confidence = obj_data['confidence'] * 0.9
+                        confidence = obj_data['confidence'] * decay_rates['dynamic']  # Apply dynamic decay
                         cost = int(min(100, confidence * 100))
                         
                         # Create a small area around the predicted position
@@ -778,7 +1204,7 @@ class SemanticCostmapVisualizer(Node):
             # Clean up old dynamic objects
             current_objects = {}
             for obj_id, obj_data in self.dynamic_objects.items():
-                if current_time - obj_data['timestamp'] <= self.decay_time:
+                if current_time - obj_data['timestamp'] <= self.dynamic_decay_time * 5:  # Use dynamic_decay_time parameter
                     current_objects[obj_id] = obj_data
             
             self.dynamic_objects = current_objects
@@ -825,6 +1251,10 @@ class SemanticCostmapVisualizer(Node):
                 if visible:
                     grid_msg = self.create_occupancy_grid_msg(layer_name)
                     self.layer_publishers[layer_name].publish(grid_msg)
+            
+            # Publish binary map if enabled
+            if self.enable_binary_output and hasattr(self, 'binary_map_pub'):
+                self.publish_binary_map()
             
             # Publish semantic markers
             self.publish_semantic_markers()
@@ -878,7 +1308,6 @@ class SemanticCostmapVisualizer(Node):
             marker.header.stamp = self.get_clock().now().to_msg()
             marker.ns = "semantic_clusters"
             marker.id = marker_id
-            marker_id += 1
             marker.type = Marker.CUBE
             marker.action = Marker.ADD
             
@@ -898,8 +1327,10 @@ class SemanticCostmapVisualizer(Node):
             marker.color.b = visual_props['color'][2]
             marker.color.a = visual_props['color'][3]
             
-            # Set lifetime
-            marker.lifetime.sec = 1
+            # Set lifetime based on marker_lifetime parameter
+            # Convert from seconds to ROS duration
+            marker.lifetime.sec = 0
+            marker.lifetime.nanosec = int(self.marker_lifetime * 1e9)  # Convert to nanoseconds
             
             marker_array.markers.append(marker)
             
@@ -921,7 +1352,10 @@ class SemanticCostmapVisualizer(Node):
                 text_marker.color.g = 1.0
                 text_marker.color.b = 1.0
                 text_marker.color.a = 1.0
-                text_marker.lifetime.sec = 1
+                
+                # Set lifetime based on marker_lifetime parameter
+                text_marker.lifetime.sec = 0
+                text_marker.lifetime.nanosec = int(self.marker_lifetime * 1e9)  # Convert to nanoseconds
                 
                 marker_array.markers.append(text_marker)
         
@@ -932,6 +1366,57 @@ class SemanticCostmapVisualizer(Node):
         """Publish height map as point cloud"""
         # TODO: Implement height map visualization
         pass
+    
+    def publish_binary_map(self):
+        """Create and publish binary (black/white) map for navigation"""
+        # Create binary map from combined costmap
+        binary_map = np.zeros_like(self.layers['combined'])
+        
+        # CRITICAL: First, ensure ANY non-zero value in the dynamic layer is included
+        # This is the most important step to ensure moving objects appear
+        dynamic_layer = self.layers['dynamic']
+        binary_map[dynamic_layer > 0] = self.occupied_value
+        dynamic_cells = np.sum(dynamic_layer > 0)
+        self.get_logger().info(f'Save map: Dynamic layer cells with ANY value: {dynamic_cells}')
+        
+        # Then apply standard thresholds for other layers
+        if self.convert_all_non_ground_to_occupied:
+            # Mark all non-ground objects as obstacles
+            for layer_name in ['obstacle', 'vegetation', 'building']:
+                # Regular threshold for other layers
+                binary_map[self.layers[layer_name] > self.binary_threshold * 100] = self.occupied_value
+        else:
+            # Only mark specific layers as obstacles
+            # Always mark obstacles
+            binary_map[self.layers['obstacle'] > self.binary_threshold * 100] = self.occupied_value
+            
+            # Conditionally mark vegetation if specified
+            if self.convert_vegetation_to_occupied:
+                binary_map[self.layers['vegetation'] > self.binary_threshold * 100] = self.occupied_value
+            
+            # Always mark buildings as obstacles
+            binary_map[self.layers['building'] > self.binary_threshold * 100] = self.occupied_value
+        
+        # Create OccupancyGrid message
+        grid_msg = OccupancyGrid()
+        grid_msg.header.stamp = self.get_clock().now().to_msg()
+        grid_msg.header.frame_id = self.map_frame
+        
+        grid_msg.info.resolution = self.map_resolution
+        grid_msg.info.width = self.map_width
+        grid_msg.info.height = self.map_height
+        grid_msg.info.origin.position.x = self.map_origin_x
+        grid_msg.info.origin.position.y = self.map_origin_y
+        
+        # Convert binary map to list with appropriate values
+        grid_msg.data = binary_map.flatten().tolist()
+        
+        # Publish binary map
+        self.binary_map_pub.publish(grid_msg)
+        
+        # Log the number of occupied cells for debugging
+        occupied_cells = np.sum(binary_map == self.occupied_value)
+        self.get_logger().info(f'Binary map published with {occupied_cells} occupied cells')
     
     def toggle_layer_callback(self, request, response):
         """Service callback to toggle layer visibility"""
@@ -945,6 +1430,130 @@ class SemanticCostmapVisualizer(Node):
             response.message = f"Layer {layer_name} not found"
         
         return response
+    
+    def save_maps_callback(self, request, response):
+        """Service callback to save maps on demand"""
+        if request.data:  # If request is true, save maps
+            try:
+                # Save maps immediately
+                self.get_logger().info("Saving maps on demand...")
+                self.save_maps()
+                response.success = True
+                response.message = f"Maps saved to {self.save_directory}"
+            except Exception as e:
+                response.success = False
+                response.message = f"Failed to save maps: {str(e)}"
+        else:
+            # Return current status
+            response.success = True
+            if self.enable_map_saving:
+                response.message = f"Map saving is enabled. Maps are saved every {self.save_interval} seconds to {self.save_directory}"
+            else:
+                response.message = "Map saving is disabled"
+        
+        return response
+    
+    def save_maps(self):
+        """Save maps as PGM files"""
+        if not self.enable_map_saving:
+            return
+        
+        try:
+            # Create timestamp for filenames
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_path = os.path.join(self.save_directory, timestamp)
+            
+            with self.costmap_lock:
+                # Save binary map if enabled
+                if self.save_binary_map and hasattr(self, 'binary_map_pub'):
+                    # Create binary map
+                    binary_map = np.zeros_like(self.layers['combined'])
+                    
+                    # CRITICAL: First, ensure ANY non-zero value in the dynamic layer is included
+                    # This is the most important step to ensure moving objects appear
+                    dynamic_layer = self.layers['dynamic']
+                    binary_map[dynamic_layer > 0] = self.occupied_value
+                    dynamic_cells = np.sum(dynamic_layer > 0)
+                    self.get_logger().info(f'Save map: Dynamic layer cells with ANY value: {dynamic_cells}')
+                    
+                    # Then apply standard thresholds for other layers
+                    if self.convert_all_non_ground_to_occupied:
+                        # Mark all non-ground objects as obstacles
+                        for layer_name in ['obstacle', 'vegetation', 'building']:
+                            # Regular threshold for other layers
+                            binary_map[self.layers[layer_name] > self.binary_threshold * 100] = self.occupied_value
+                    else:
+                        # Only mark specific layers as obstacles
+                        # Always mark obstacles
+                        binary_map[self.layers['obstacle'] > self.binary_threshold * 100] = self.occupied_value
+                        
+                        # Conditionally mark vegetation if specified
+                        if self.convert_vegetation_to_occupied:
+                            binary_map[self.layers['vegetation'] > self.binary_threshold * 100] = self.occupied_value
+                        
+                        # Always mark buildings as obstacles
+                        binary_map[self.layers['building'] > self.binary_threshold * 100] = self.occupied_value
+                    
+                    # Save binary map
+                    self.save_pgm(binary_map, f"{base_path}_binary.pgm", self.occupied_value)
+                    self.get_logger().info(f"Binary map saved to {base_path}_binary.pgm")
+                
+                # Save combined map if enabled
+                if self.save_combined_map:
+                    # Compute combined map
+                    self.compute_combined_costmap()
+                    # Save combined map
+                    self.save_pgm(self.layers['combined'], f"{base_path}_combined.pgm")
+                    print(f"Combined map saved to {base_path}_combined.pgm")
+                    self.get_logger().info(f"Combined map saved to {base_path}_combined.pgm")
+                
+                # Save individual layer maps if enabled
+                if self.save_layer_maps:
+                    for layer_name in ['ground', 'obstacle', 'vegetation', 'building', 'dynamic']:
+                        # Save layer map
+                        self.save_pgm(self.layers[layer_name], f"{base_path}_{layer_name}.pgm")
+                        self.get_logger().info(f"{layer_name.capitalize()} layer map saved to {base_path}_{layer_name}.pgm")
+                        
+            # Update last save time
+            self.last_save_time = time.time()
+            
+        except Exception as e:
+            self.get_logger().error(f"Error saving maps: {str(e)}")
+    
+    def save_pgm(self, map_data, filename, max_value=100):
+        """Save map data as PGM file"""
+        try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            
+            # Open file for writing
+            with open(filename, 'wb') as f:
+                # Write PGM header
+                f.write(f"P5\n".encode())
+                f.write(f"# Created by Semantic Costmap Visualizer\n".encode())
+                f.write(f"{self.map_width} {self.map_height}\n".encode())
+                f.write(f"{max_value}\n".encode())
+                
+                # Write map data
+                # Convert 0-100 scale to 0-255 scale and flip vertically for PGM format
+                data = ((map_data.astype(np.float32) / max_value) * 255).astype(np.uint8)
+                data = np.flipud(data)  # Flip vertically
+                f.write(data.tobytes())
+                
+            # Also save a YAML metadata file for the map
+            yaml_filename = filename.replace('.pgm', '.yaml')
+            with open(yaml_filename, 'w') as f:
+                f.write(f"image: {os.path.basename(filename)}\n")
+                f.write(f"resolution: {self.map_resolution}\n")
+                f.write(f"origin: [{self.map_origin_x}, {self.map_origin_y}, 0.0]\n")
+                f.write(f"negate: 0\n")
+                f.write(f"occupied_thresh: {self.binary_threshold}\n")
+                f.write(f"free_thresh: 0.196\n")  # Standard ROS value
+                
+            return True
+        except Exception as e:
+            self.get_logger().error(f"Error saving PGM file {filename}: {str(e)}")
+            return False
 
 def main(args=None):
     rclpy.init(args=args)

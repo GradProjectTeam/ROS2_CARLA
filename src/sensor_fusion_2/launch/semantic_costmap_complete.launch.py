@@ -1,9 +1,42 @@
 #!/usr/bin/env python3
+"""
+Semantic Costmap Launch File - Balanced for Responsive Highway Navigation and Trajectory Planning
+
+This launch file has been tuned for balanced responsiveness with the following settings:
+- Moderate decay_time of 0.1s for responsive map updates without excessive flickering
+- Dynamic object decay time of 0.05s for timely fading of moving objects
+- Cell_memory set to 0.1s for responsive radar map updates
+- Max_tracking_age set to 0.2s for reliable object tracking
+- Marker_lifetime set to 0.1s for smooth visualization
+
+Enhanced Vegetation and Object Detection:
+- All detection weights maximized to 10.0 (maximum allowed)
+- Reduced vegetation_height_ratio to 2.0 for more sensitive vegetation detection
+- Binary_threshold set to 0.05 for reliable classification of obstacles
+- Added special conversion flags to ensure all vegetation and detections appear as black
+
+Binary Map Output for Navigation:
+- All detected objects (including vegetation) are converted to black for navigation
+- The binary map is published on the /semantic_costmap/binary topic
+- Uses standard values: 100 for occupied cells (black), 0 for free space
+- All layer weights maximized within allowed ranges (0.0-10.0)
+
+These balanced decay times make the system responsive while avoiding excessive
+flicker or instability. This provides a good balance between responsiveness and
+stability for highway navigation.
+
+Visualization notes:
+- Red cells represent dynamic objects (high cost areas)
+- Blue cells represent static obstacles (medium cost areas)
+- Green cells represent vegetation (also converted to black for navigation)
+- All non-ground detections are converted to black (occupied = 100) in the binary map
+- Cells fade to transparent/empty (value = 0) based on the decay times
+"""
 
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
 from launch.substitutions import LaunchConfiguration, TextSubstitution
 from launch_ros.actions import Node
 from launch.conditions import IfCondition
@@ -13,7 +46,7 @@ def generate_launch_description():
     pkg_share = get_package_share_directory('sensor_fusion_2')
     
     # Define the path to the RViz configuration file
-    rviz_config_file = os.path.join(pkg_share, 'rviz', 'semantic_costmap.rviz')
+    rviz_config_file = os.path.join(pkg_share, 'rviz', 'semantic_binary_map.rviz')
     
     # ==================== DECLARE LAUNCH ARGUMENTS ====================
     # Common arguments
@@ -44,7 +77,7 @@ def generate_launch_description():
     
     declare_radar_tcp_ip = DeclareLaunchArgument(
         'radar_tcp_ip',
-        default_value='127.0.0.1',
+        default_value='127.0.0.1',  # Use localhost as a safe default
         description='IP address for radar TCP connection'
     )
     
@@ -52,6 +85,19 @@ def generate_launch_description():
         'radar_tcp_port',
         default_value='12348',
         description='Port for radar TCP connection'
+    )
+    
+    # Add additional radar connection parameters
+    declare_radar_reconnect_interval = DeclareLaunchArgument(
+        'radar_reconnect_interval',
+        default_value='2.0',  # Increase from 1.0 to 2.0 for more time between retries
+        description='Seconds between radar reconnection attempts'
+    )
+
+    declare_radar_connection_timeout = DeclareLaunchArgument(
+        'radar_connection_timeout',
+        default_value='10.0',  # Increase from 5.0 to 10.0 for longer timeout
+        description='Timeout in seconds for radar connection attempts'
     )
     
     # TF Tree parameters
@@ -88,7 +134,7 @@ def generate_launch_description():
     
     declare_publish_rate = DeclareLaunchArgument(
         'publish_rate',
-        default_value='30.0',  # Updated from 20.0 to 30.0
+        default_value='30.0',  # Reduced from 60.0 to 30.0 for more stable visualization
         description='Rate at which to publish costmap layers (Hz)'
     )
     
@@ -100,7 +146,7 @@ def generate_launch_description():
     
     declare_motion_prediction = DeclareLaunchArgument(
         'motion_prediction',
-        default_value='true',  # Unchanged
+        default_value='false',  # Unchanged
         description='Enable motion prediction for dynamic objects'
     )
     
@@ -113,7 +159,7 @@ def generate_launch_description():
     
     declare_vegetation_height_ratio = DeclareLaunchArgument(
         'vegetation_height_ratio',
-        default_value='3.0',  # Unchanged
+        default_value='2.0',  # Reduced from 3.0 to make vegetation detection more sensitive
         description='Height to width ratio for vegetation classification'
     )
     
@@ -138,25 +184,25 @@ def generate_launch_description():
     
     declare_obstacle_weight = DeclareLaunchArgument(
         'obstacle_weight',
-        default_value='8.0',  # Adjusted from 10.0 to 8.0
+        default_value='10.0',  # Increased to maximum allowed value (10.0) for clear visualization
         description='Weight of obstacle layer in combined map'
     )
     
     declare_vegetation_weight = DeclareLaunchArgument(
         'vegetation_weight',
-        default_value='8.0',  # Adjusted from 10.0 to 8.0
+        default_value='10.0',  # Increased to maximum allowed value (10.0) to ensure vegetation is properly detected
         description='Weight of vegetation layer in combined map'
     )
     
     declare_building_weight = DeclareLaunchArgument(
         'building_weight',
-        default_value='8.0',  # Adjusted from 10.0 to 8.0
+        default_value='10.0',  # Increased to maximum allowed value (10.0) for clear visualization
         description='Weight of building layer in combined map'
     )
     
     declare_dynamic_weight = DeclareLaunchArgument(
         'dynamic_weight',
-        default_value='10.0',  # Keep at 10.0 to emphasize dynamic objects
+        default_value='10.0',  # Maximum allowed value
         description='Weight of dynamic layer in combined map'
     )
     
@@ -196,6 +242,142 @@ def generate_launch_description():
         'enable_tuning',
         default_value='true',  # Enable tuning by default
         description='Enable rqt_reconfigure for parameter tuning'
+    )
+    
+    # Add decay time parameter for better highway navigation
+    declare_decay_time = DeclareLaunchArgument(
+        'decay_time',
+        default_value='0.1',  # Increased from 0.01s to 0.1s for more stable visualization
+        description='Decay time for costmap cells in seconds'
+    )
+    
+    # Add dynamic object specific decay time
+    declare_dynamic_decay_time = DeclareLaunchArgument(
+        'dynamic_decay_time',
+        default_value='0.05',  # Increased from 0.005s to 0.05s for more stable tracking
+        description='Decay time specifically for dynamic objects in seconds'
+    )
+    
+    # Add cell memory parameter for radar map
+    declare_cell_memory = DeclareLaunchArgument(
+        'cell_memory',
+        default_value='0.1',  # Increased from 0.01s to 0.1s for more stable radar map
+        description='Memory time for radar map cells in seconds'
+    )
+    
+    # Add tracking age parameter for highway speeds
+    declare_max_tracking_age = DeclareLaunchArgument(
+        'max_tracking_age',
+        default_value='0.2',  # Increased from 0.05s to 0.2s for more stable tracking
+        description='Maximum age for tracked objects in seconds'
+    )
+    
+    # Add marker lifetime parameter
+    declare_marker_lifetime = DeclareLaunchArgument(
+        'marker_lifetime',
+        default_value='0.1',  # Increased from 0.01s to 0.1s for more stable visualization
+        description='Lifetime of visualization markers in seconds'
+    )
+    
+    # Add parameters for binary output map
+    declare_binary_threshold = DeclareLaunchArgument(
+        'binary_threshold',
+        default_value='0.05',  # Reduced threshold even further to immediately mark cells as obstacles
+        description='Threshold value for binary obstacle classification'
+    )
+    
+    declare_enable_binary_output = DeclareLaunchArgument(
+        'enable_binary_output',
+        default_value='true',  # Enable binary output by default
+        description='Enable binary (black/white) output map for navigation'
+    )
+    
+    declare_binary_topic = DeclareLaunchArgument(
+        'binary_topic',
+        default_value='/semantic_costmap/binary',
+        description='Topic name for publishing binary obstacle map'
+    )
+    
+    # Add parameters for map saving
+    declare_enable_map_saving = DeclareLaunchArgument(
+        'enable_map_saving',
+        default_value='true',  # Disabled by default
+        description='Enable saving maps to local files'
+    )
+    
+    declare_save_directory = DeclareLaunchArgument(
+        'save_directory',
+        default_value='/home/mostafa/GP/ROS2/maps/NewMaps',
+        description='Directory to save map files'
+    )
+    
+    declare_save_interval = DeclareLaunchArgument(
+        'save_interval',
+        default_value='5.0',  # Updated from 3.0 to 5.0 seconds
+        description='Interval in seconds between map saves'
+    )
+    
+    declare_save_binary_map = DeclareLaunchArgument(
+        'save_binary_map',
+        default_value='true',  # Save binary map by default
+        description='Save the binary map'
+    )
+    
+    declare_save_combined_map = DeclareLaunchArgument(
+        'save_combined_map',
+        default_value='true',  # Save combined map by default
+        description='Save the combined map'
+    )
+    
+    declare_save_layer_maps = DeclareLaunchArgument(
+        'save_layer_maps',
+        default_value='false',  # Don't save layer maps by default
+        description='Save individual layer maps'
+    )
+    
+    declare_occupied_value = DeclareLaunchArgument(
+        'occupied_value',
+        default_value='100',
+        description='Value for occupied cells in the binary map (black)'
+    )
+    
+    declare_free_value = DeclareLaunchArgument(
+        'free_value',
+        default_value='0',
+        description='Value for free cells in the binary map (white/transparent)'
+    )
+    
+    declare_map_format = DeclareLaunchArgument(
+        'map_format',
+        default_value='nav_msgs/OccupancyGrid',
+        description='Format of the output map message'
+    )
+    
+    declare_publish_binary_map = DeclareLaunchArgument(
+        'publish_binary_map',
+        default_value='true',
+        description='Whether to publish the binary map'
+    )
+    
+    # New parameter for comprehensive object inclusion
+    declare_include_all_objects = DeclareLaunchArgument(
+        'include_all_objects',
+        default_value='true',
+        description='Include all detected objects in the binary map, regardless of classification'
+    )
+
+    # New parameter for dedicated binary map
+    declare_enhanced_binary_map = DeclareLaunchArgument(
+        'enhanced_binary_map',
+        default_value='true',
+        description='Generate an enhanced binary map with all detected objects'
+    )
+    
+    # New parameter for binary map topic
+    declare_all_objects_binary_topic = DeclareLaunchArgument(
+        'all_objects_binary_topic',
+        default_value='/semantic_costmap/all_objects_binary',
+        description='Topic name for publishing comprehensive binary map with all objects'
     )
     
     # ==================== TF TREE CONFIGURATION ====================
@@ -308,40 +490,50 @@ def generate_launch_description():
             'grid_height': LaunchConfiguration('map_height_meters'),
             'show_velocity_vectors': True,
             'radar_to_map_fusion': True,
-            'marker_lifetime': 0.5,  # Unchanged
+            'marker_lifetime': LaunchConfiguration('marker_lifetime'),
             'point_size': 0.2,
             'use_advanced_coloring': True,
             'velocity_arrow_scale': 1.0,
             'min_velocity_for_display': 0.1,
             'max_velocity_for_display': 30.0,
-            'frame_id': 'radar_link',  # Unchanged
-            'map_frame_id': 'map',  # Unchanged
-            'points_topic': '/radar/points',  # Unchanged
+            'frame_id': 'radar_link',
+            'map_frame_id': 'map',
+            'points_topic': '/radar/points',
             'clusters_topic': '/radar/clusters',
             'velocity_vectors_topic': '/radar/velocity_vectors',
-            'moving_objects_topic': '/radar/moving_objects',  # Unchanged
-            'static_objects_topic': '/radar/static_objects',  # Unchanged
-            'object_tracking_topic': '/radar/object_tracking',  # Unchanged
+            'moving_objects_topic': '/radar/moving_objects',
+            'static_objects_topic': '/radar/static_objects',
+            'object_tracking_topic': '/radar/object_tracking',
             'min_points_per_cluster': 1,  # Keep at 1 to detect sparse clusters
-            'cluster_distance_threshold': 1.0,  # Increased from 0.0 to 1.0 to better group points
-            'static_velocity_threshold': 0.2,  # Increased from 0.0 to 0.2 to better identify stationary objects
-            'moving_velocity_threshold': 0.5,  # Increased from 0.0 to 0.5 to better identify moving objects
-            'use_dbscan_clustering': True,  # Unchanged
-            'dbscan_epsilon': 1.0,  # Increased from 0.7 to 1.0 to create larger clusters
-            'dbscan_min_samples': 2,  # Reduced from 3 to 2 to detect smaller clusters
-            'track_objects': True,  # Unchanged
-            'max_tracking_age': 2.0,  # Unchanged
-            'min_track_confidence': 0.6,  # Unchanged
-            'verbose_logging': True,  # Changed from False to True for better debugging
-            'publish_rate': 60.0,  # Added from test1_radar.yaml
-            'moving_object_color_r': 1.0,  # Added from test1_radar.yaml
-            'moving_object_color_g': 0.0,  # Added from test1_radar.yaml
-            'moving_object_color_b': 0.0,  # Added from test1_radar.yaml
-            'moving_object_color_a': 0.8,  # Added from test1_radar.yaml
-            'static_object_color_r': 0.0,  # Added from test1_radar.yaml
-            'static_object_color_g': 0.0,  # Added from test1_radar.yaml
-            'static_object_color_b': 1.0,  # Added from test1_radar.yaml
-            'static_object_color_a': 0.8,  # Added from test1_radar.yaml
+            'cluster_distance_threshold': 1.0,
+            'static_velocity_threshold': 0.2,
+            'moving_velocity_threshold': 0.5,
+            'use_dbscan_clustering': True,
+            'dbscan_epsilon': 1.0,
+            'dbscan_min_samples': 2,
+            'track_objects': True,
+            'max_tracking_age': LaunchConfiguration('max_tracking_age'),
+            'min_track_confidence': 0.6,
+            'verbose_logging': True,
+            'publish_rate': 60.0,  # Reduced from 100.0 to 60.0 Hz for more stable processing
+            'moving_object_color_r': 1.0,
+            'moving_object_color_g': 0.0,
+            'moving_object_color_b': 0.0,
+            'moving_object_color_a': 0.8,
+            'static_object_color_r': 0.0,
+            'static_object_color_g': 0.0,
+            'static_object_color_b': 1.0,
+            'static_object_color_a': 0.8,
+            # Add additional connection parameters
+            'radar_host': LaunchConfiguration('radar_tcp_ip'),  # Use same IP as tcp_ip
+            'radar_port': LaunchConfiguration('radar_tcp_port'),  # Use same port as tcp_port
+            'reconnect_interval': LaunchConfiguration('radar_reconnect_interval'),
+            'connection_timeout': LaunchConfiguration('radar_connection_timeout'),
+            'auto_reconnect': True,
+            'socket_buffer_size': 262144,  # Increased buffer size
+            'socket_timeout': 0.5,  # Increased timeout
+            'enable_tcp_nodelay': True,
+            'enable_socket_keepalive': True,
         }],
         output='screen'
     )
@@ -368,10 +560,10 @@ def generate_launch_description():
             'dbscan_epsilon': 1.0,  # Increased from 0.7 to 1.0
             'dbscan_min_samples': 2,  # Reduced from 3 to 2
             'track_objects': True,  # Unchanged
-            'max_tracking_age': 2.0,  # Unchanged
+            'max_tracking_age': LaunchConfiguration('max_tracking_age'),  # Updated to use launch argument
             'min_track_confidence': 0.6,  # Unchanged
             'verbose_logging': True,  # Changed from False to True
-            'publish_rate': 60.0,  # Added from test1_radar.yaml
+            'publish_rate': 60.0,  # Reduced from 100.0 to 60.0 Hz for more stable processing
             'moving_object_color_r': 1.0,  # Added from test1_radar.yaml
             'moving_object_color_g': 0.0,  # Added from test1_radar.yaml
             'moving_object_color_b': 0.0,  # Added from test1_radar.yaml
@@ -417,11 +609,11 @@ def generate_launch_description():
             'map_frame': LaunchConfiguration('map_frame_id'),
             'radar_topic': '/radar/points',
             'map_topic': '/radar/map',
-            'publish_rate': 20.0,  # From test2_radar.yaml
+            'publish_rate': 30.0,  # Reduced from 60.0 to 30.0 for more stable map updates
             'use_velocity_filter': True,
             'use_temporal_filtering': True,
             'min_velocity': 0.0,  # From test2_radar.yaml
-            'cell_memory': 1.0,
+            'cell_memory': LaunchConfiguration('cell_memory'),  # Using updated launch argument
             'obstacle_threshold': 0.0,  # From test2_radar.yaml
             'free_threshold': -0.2,
             'start_type_description_service': True,
@@ -454,7 +646,8 @@ def generate_launch_description():
             'temporal_filtering': LaunchConfiguration('temporal_filtering'),
             'motion_prediction': LaunchConfiguration('motion_prediction'),
             'min_confidence': 0.5,
-            'decay_time': 0.5,  # From test1.yaml
+            'decay_time': LaunchConfiguration('decay_time'),
+            'dynamic_decay_time': LaunchConfiguration('dynamic_decay_time'),
             'ground_height_threshold': LaunchConfiguration('ground_height_threshold'),
             'vegetation_height_ratio': LaunchConfiguration('vegetation_height_ratio'),
             'building_width_threshold': LaunchConfiguration('building_width_threshold'),
@@ -466,7 +659,35 @@ def generate_launch_description():
             'dynamic_weight': LaunchConfiguration('dynamic_weight'),
             'enable_3d_visualization': LaunchConfiguration('enable_3d_visualization'),
             'enable_text_labels': LaunchConfiguration('enable_text_labels'),
-            'start_type_description_service': True,  # Added from test1.yaml
+            'start_type_description_service': True,
+            
+            # Binary output for navigation - simplified parameters
+            'enable_binary_output': True,
+            'binary_topic': LaunchConfiguration('binary_topic'),
+            'occupied_value': 100,
+            'free_value': 0,
+            'binary_threshold': LaunchConfiguration('binary_threshold'),
+            'convert_vegetation_to_occupied': True,  # Explicitly convert vegetation to occupied
+            'convert_all_non_ground_to_occupied': True,  # All non-ground objects become obstacles
+            
+            # Enhanced binary map with all objects
+            'enable_enhanced_binary_map': LaunchConfiguration('enhanced_binary_map'),
+            'all_objects_binary_topic': LaunchConfiguration('all_objects_binary_topic'),
+            'include_all_objects': LaunchConfiguration('include_all_objects'),
+            'include_radar_objects': True,
+            'include_lidar_objects': True,
+            'include_dynamic_objects': True,
+            'include_static_objects': True,
+            'use_lower_threshold_for_all_objects': True,
+            'all_objects_threshold': 0.01,  # Very low threshold to include even faint detections
+            
+            # Map saving parameters
+            'enable_map_saving': LaunchConfiguration('enable_map_saving'),
+            'save_directory': LaunchConfiguration('save_directory'),
+            'save_interval': LaunchConfiguration('save_interval'),
+            'save_binary_map': LaunchConfiguration('save_binary_map'),
+            'save_combined_map': LaunchConfiguration('save_combined_map'),
+            'save_layer_maps': LaunchConfiguration('save_layer_maps'),
         }],
         output='screen'
     )
@@ -499,6 +720,9 @@ def generate_launch_description():
         declare_lidar_tcp_port,
         declare_radar_tcp_ip,
         declare_radar_tcp_port,
+        # Add new radar connection arguments
+        declare_radar_reconnect_interval,
+        declare_radar_connection_timeout,
         declare_vehicle_frame_id,
         declare_map_frame_id,
         declare_map_resolution,
@@ -524,22 +748,56 @@ def generate_launch_description():
         declare_vehicle_width,
         declare_vehicle_height,
         declare_enable_tuning,
+        # Decay time parameters
+        declare_decay_time,
+        declare_dynamic_decay_time,
+        declare_cell_memory,
+        declare_max_tracking_age,
+        declare_marker_lifetime,
         
-        # TF Tree Nodes
+        # Binary output parameters
+        declare_binary_threshold,
+        declare_enable_binary_output,
+        declare_binary_topic,
+        declare_occupied_value,
+        declare_free_value,
+        declare_map_format,
+        declare_publish_binary_map,
+        
+        # New enhanced binary map parameters
+        declare_include_all_objects,
+        declare_enhanced_binary_map,
+        declare_all_objects_binary_topic,
+        
+        # Map saving parameters
+        declare_enable_map_saving,
+        declare_save_directory,
+        declare_save_interval,
+        declare_save_binary_map,
+        declare_save_combined_map,
+        declare_save_layer_maps,
+        
+        # TF Tree Nodes - Launch these first to establish the TF tree
         world_to_map_node,
         map_to_base_link_node,
         base_to_lidar_node,
         base_to_radar_node,
         
-        # Sensor Nodes
-        lidar_listener_node,
-        radar_listener_node,
-        radar_object_detector_node,
-        lidar_realtime_mapper_node,
-        radar_map_generator_node,
-        
-        # Visualization Nodes
-        semantic_costmap_node,
-        rviz_node,
-        rqt_reconfigure_node
+        # Add a timing delay to ensure TF tree is established before other nodes start
+        TimerAction(
+            period=2.0,  # Wait 2 seconds for TF tree to be established
+            actions=[
+                # Sensor Nodes
+                lidar_listener_node,
+                radar_listener_node,
+                radar_object_detector_node,
+                lidar_realtime_mapper_node,
+                radar_map_generator_node,
+                
+                # Visualization Nodes
+                semantic_costmap_node,
+                rviz_node,
+                rqt_reconfigure_node
+            ]
+        )
     ]) 
