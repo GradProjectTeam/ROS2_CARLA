@@ -519,6 +519,38 @@ def generate_launch_description():
         description='Y-coordinate of map origin in meters'
     )
     
+    # Add IMU TCP connection parameters
+    declare_imu_tcp_ip = DeclareLaunchArgument(
+        'imu_tcp_ip',
+        default_value='127.0.0.1',
+        description='IP address for IMU TCP connection'
+    )
+    
+    declare_imu_tcp_port = DeclareLaunchArgument(
+        'imu_tcp_port',
+        default_value='12345',  # Use an appropriate port for IMU
+        description='Port for IMU TCP connection'
+    )
+    
+    declare_imu_reconnect_interval = DeclareLaunchArgument(
+        'imu_reconnect_interval',
+        default_value='2.0',
+        description='Seconds between IMU reconnection attempts'
+    )
+
+    declare_imu_connection_timeout = DeclareLaunchArgument(
+        'imu_connection_timeout',
+        default_value='10.0',
+        description='Timeout in seconds for IMU connection attempts'
+    )
+    
+    # Add IMU frame parameters
+    declare_imu_frame_id = DeclareLaunchArgument(
+        'imu_frame_id',
+        default_value='imu_link',
+        description='Frame ID for the IMU'
+    )
+    
     # ==================== TF TREE CONFIGURATION ====================
     # Root transform: world to map
     world_to_map_node = Node(
@@ -583,6 +615,24 @@ def generate_launch_description():
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
     )
     
+    # Base to IMU transform
+    base_to_imu_node = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='tf_base_to_imu',
+        arguments=[
+            '0.0',  # X offset - IMU is centered on the vehicle
+            '0.0',  # Y offset - centered on vehicle
+            '1.5',  # Z offset - IMU is 1.5m above the base
+            '0',    # Roll - no roll (0 degrees)
+            '0',    # Pitch - no pitch (0 degrees)
+            '0',    # Yaw - no yaw (0 degrees)
+            'base_link', 
+            'imu_link'
+        ],
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
+    )
+    
     # ==================== SENSOR NODES ====================
     # LiDAR Listener Node - Updated from test1_lidar.yaml
     lidar_listener_node = Node(
@@ -598,28 +648,31 @@ def generate_launch_description():
             'vehicle_width': LaunchConfiguration('vehicle_width'),           
             'vehicle_height': LaunchConfiguration('vehicle_height'),
             'enable_motion_compensation': True,
-            'use_imu_data': False,  # We're not using IMU data in this setup
+            'use_imu_data': True,  # Use IMU data for motion compensation
             'frame_id': 'lidar_link',
-            'use_tf_transform': True,
+            'imu_frame_id': LaunchConfiguration('imu_frame_id'),  # Added IMU frame ID
+            'imu_topic': '/imu/data',  # Topic published by imu_euler_visualizer
+            'use_tf_transform': True,  # Make sure TF transform is enabled
             'publish_grid_map': True,
             'map_topic': '/lidar/map',
-            'point_size': 2.0,  # Added from test1_lidar.yaml
-            'cube_alpha': 0.8,  # Added from test1_lidar.yaml
-            'use_cluster_stats': True,  # Added from test1_lidar.yaml
-            'use_convex_hull': True,  # Added from test1_lidar.yaml
-            'use_point_markers': True,  # Added from test1_lidar.yaml
-            'vehicle_safety_margin': 0.5,  # Added from test1_lidar.yaml
-            'vehicle_visualization': True,  # Added from test1_lidar.yaml
-            'vehicle_x_offset': 0.0,  # Added from test1_lidar.yaml
-            'vehicle_y_offset': 0.0,  # Added from test1_lidar.yaml
-            'vehicle_z_offset': -1.0,  # Added from test1_lidar.yaml
-            'center_size': 3.0,  # Added from test1_lidar.yaml
-            'lidar_lower_fov': -5.0,  # Added from test1_lidar.yaml
-            'lidar_upper_fov': 10.0,  # Added from test1_lidar.yaml
-            'lidar_pitch_angle': 0.0,  # Added from test1_lidar.yaml
-            'min_point_distance': 0.0,  # Added from test1_lidar.yaml
-            'max_negative_z': -100.0,  # Added from test1_lidar.yaml
-            'verbose_logging': False,  # Added from test1_lidar.yaml
+            'map_frame_id': 'map',  # Ensure map frame is set correctly
+            'point_size': 2.0,
+            'cube_alpha': 0.8,
+            'use_cluster_stats': True,
+            'use_convex_hull': True,
+            'use_point_markers': True,
+            'vehicle_safety_margin': 0.5,
+            'vehicle_visualization': True,
+            'vehicle_x_offset': 0.0,
+            'vehicle_y_offset': 0.0,
+            'vehicle_z_offset': -1.0,
+            'center_size': 3.0,
+            'lidar_lower_fov': -5.0,
+            'lidar_upper_fov': 10.0,
+            'lidar_pitch_angle': 0.0,
+            'min_point_distance': 0.0,
+            'max_negative_z': -100.0,
+            'verbose_logging': True,  # Enable verbose logging for debugging
         }],
         output='screen'
     )
@@ -953,6 +1006,32 @@ def generate_launch_description():
         output='screen'
     )
     
+    # IMU Listener Node
+    imu_listener_node = Node(
+        package='sensor_fusion_2',
+        executable='imu_euler_visualizer_simple',  # Use the full version of the IMU visualizer
+        name='imu_euler_visualizer_simple',
+        parameters=[{
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'tcp_ip': LaunchConfiguration('imu_tcp_ip'),
+            'tcp_port': LaunchConfiguration('imu_tcp_port'),
+            'frame_id': LaunchConfiguration('imu_frame_id'),
+            'world_frame_id': 'map',  # Use map as the world frame
+            'reconnect_interval': LaunchConfiguration('imu_reconnect_interval'),
+            'filter_window_size': 5,  # Use a moderate filter window size for smooth data
+            'queue_size': 20,  # Buffer size for IMU data
+            'publish_rate': 100.0,  # High rate for accurate motion compensation
+            'socket_buffer_size': 262144,
+            'enable_bias_correction': True,  # Enable gyro bias correction
+            'enable_complementary_filter': True,  # Use complementary filter for sensor fusion
+            'zero_velocity_threshold': 0.02,  # m/s^2
+            'yaw_offset': 0.0,  # No yaw offset by default
+            'road_plane_correction': True,  # Correct for road plane
+            'gravity_aligned': True,  # Align with gravity
+        }],
+        output='screen'
+    )
+    
     # ==================== LAUNCH DESCRIPTION ====================
     return LaunchDescription([
         # Launch Arguments
@@ -1035,12 +1114,22 @@ def generate_launch_description():
         declare_obstacle_expansion_radius,
         declare_dynamic_expansion_radius,
         
+        # Add IMU connection parameters
+        declare_imu_tcp_ip,
+        declare_imu_tcp_port,
+        declare_imu_reconnect_interval,
+        declare_imu_connection_timeout,
+        
+        # Add IMU frame parameters
+        declare_imu_frame_id,
+        
         # TF Tree Nodes - Launch these first to establish the TF tree
         world_to_map_node,
         map_to_base_link_node,
         map_to_waypoint_node,
         base_to_lidar_node,
         base_to_radar_node,
+        base_to_imu_node,
         
         # Add a timing delay to ensure TF tree is established before other nodes start
         TimerAction(
@@ -1061,7 +1150,8 @@ def generate_launch_description():
                 semantic_costmap_node,
                 binary_map_combiner_node,
                 rviz_node,
-                rqt_reconfigure_node
+                rqt_reconfigure_node,
+                imu_listener_node
             ]
         )
     ]) 
