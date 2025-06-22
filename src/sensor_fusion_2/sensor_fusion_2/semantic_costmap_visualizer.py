@@ -594,6 +594,7 @@ class SemanticCostmapVisualizer(Node):
         
         self.declare_parameter(
             'save_directory',
+            # '/home/shishtawy/Documents/ROS2/maps/NewMaps
             '/home/mostafa/GP/ROS2/maps/NewMaps',
             ParameterDescriptor(
                 description='Directory to save map files'
