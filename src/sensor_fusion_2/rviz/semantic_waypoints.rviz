@@ -87,10 +87,11 @@ Visualization Manager:
         world:
           map:
             base_link:
-              lidar_link:
-                {}
-              radar_link:
-                {}
+              imu_link:
+                lidar_link:
+                  {}
+                radar_link:
+                  {}
             waypoint_frame:
               {}
       Update Interval: 0

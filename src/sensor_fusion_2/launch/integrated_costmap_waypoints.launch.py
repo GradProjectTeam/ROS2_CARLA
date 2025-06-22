@@ -580,42 +580,6 @@ def generate_launch_description():
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
     )
     
-    # Base to LiDAR transform with rotation
-    base_to_lidar_node = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='tf_base_to_lidar',
-        arguments=[
-            '1.5',  # X offset - LiDAR is 1.5m forward from base
-            '0.0',  # Y offset - centered on vehicle
-            '1.9',  # Z offset - LiDAR is 1.9m above the base
-            '90',    # Roll - no roll (0 degrees)
-            '0',    # Pitch - no pitch (0 degrees)
-            '90',   # Yaw - 90 degree rotation (looking to the side)
-            'base_link', 
-            'lidar_link'
-        ],
-        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
-    )
-    
-    # Base to Radar transform with rotation
-    base_to_radar_node = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='tf_base_to_radar',
-        arguments=[
-            '1.5',  # X offset - Radar is 1.5m forward from base
-            '0.5',  # Y offset - Radar is 0.5m to the right
-            '1.9',  # Z offset - Radar is 1.9m above the base
-            '0',    # Roll - no roll (0 degrees)
-            '0',    # Pitch - no pitch (0 degrees)
-            '0',    # Yaw - 0 degree rotation (looking forward, perpendicular to LiDAR)
-            'base_link', 
-            'radar_link'
-        ],
-        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
-    )
-    
     # Base to IMU transform
     base_to_imu_node = Node(
         package='tf2_ros',
@@ -630,6 +594,42 @@ def generate_launch_description():
             '0',    # Yaw - no yaw (0 degrees)
             'base_link', 
             'imu_link'
+        ],
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
+    )
+    
+    # IMU to LiDAR transform with rotation
+    imu_to_lidar_node = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='tf_imu_to_lidar',
+        arguments=[
+            '1.5',  # X offset - LiDAR is 1.5m forward from IMU
+            '0.0',  # Y offset - centered on vehicle
+            '0.4',  # Z offset - LiDAR is 0.4m above the IMU (1.9m - 1.5m)
+            '0',    # Roll - no roll (0 degrees)
+            '0',    # Pitch - no pitch (0 degrees)
+            '90',   # Yaw - 90 degree rotation (looking to the side)
+            'imu_link', 
+            'lidar_link'
+        ],
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
+    )
+    
+    # IMU to Radar transform with rotation
+    imu_to_radar_node = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='tf_imu_to_radar',
+        arguments=[
+            '1.5',  # X offset - Radar is 1.5m forward from IMU
+            '0.5',  # Y offset - Radar is 0.5m to the right of IMU
+            '0.4',  # Z offset - Radar is 0.4m above the IMU (1.9m - 1.5m)
+            '0',    # Roll - no roll (0 degrees)
+            '0',    # Pitch - no pitch (0 degrees)
+            '0',    # Yaw - 0 degree rotation (looking forward, perpendicular to LiDAR)
+            'imu_link', 
+            'radar_link'
         ],
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
     )
@@ -651,6 +651,7 @@ def generate_launch_description():
             'enable_motion_compensation': True,
             'use_imu_data': True,  # Use IMU data for motion compensation
             'frame_id': 'lidar_link',
+            'parent_frame_id': 'imu_link',  # Parent frame is now IMU link
             'imu_frame_id': LaunchConfiguration('imu_frame_id'),  # Added IMU frame ID
             'imu_topic': '/imu/data',  # Topic published by imu_euler_visualizer
             'use_tf_transform': True,  # Make sure TF transform is enabled
@@ -699,7 +700,9 @@ def generate_launch_description():
             'min_velocity_for_display': 0.0,  # Set to 0.0 to display all objects regardless of velocity
             'max_velocity_for_display': 30.0,
             'frame_id': 'radar_link',
+            'parent_frame_id': 'imu_link',  # Parent frame is now IMU link
             'map_frame_id': 'map',
+            'use_tf_transform': True,  # Make sure TF transform is enabled
             'points_topic': '/radar/points',
             'clusters_topic': '/radar/clusters',
             'velocity_vectors_topic': '/radar/velocity_vectors',
@@ -1128,9 +1131,9 @@ def generate_launch_description():
         world_to_map_node,
         map_to_base_link_node,
         map_to_waypoint_node,
-        base_to_lidar_node,
-        base_to_radar_node,
         base_to_imu_node,
+        imu_to_lidar_node,
+        imu_to_radar_node,
         
         # Add a timing delay to ensure TF tree is established before other nodes start
         TimerAction(
