@@ -342,7 +342,7 @@ Visualization Manager:
         
         # IMU Data
         - Alpha: 1.0
-          Class: rviz_default_plugins/Imu
+          Class: rviz_imu_plugin/Imu
           Enabled: true
           Name: IMU Data
           Topic:
