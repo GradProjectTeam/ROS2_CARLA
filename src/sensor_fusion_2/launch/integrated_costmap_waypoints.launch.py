@@ -609,7 +609,7 @@ def generate_launch_description():
             '0.4',  # Z offset - LiDAR is 0.4m above the IMU (1.9m - 1.5m)
             '0',    # Roll - no roll (0 degrees)
             '0',    # Pitch - no pitch (0 degrees)
-            '90',   # Yaw - 90 degree rotation (looking to the side)
+            '90',   # Yaw - 90 degree rotation (looking to the side, matching CARLA config)
             'imu_link', 
             'lidar_link'
         ],
@@ -951,8 +951,8 @@ def generate_launch_description():
             'reconnect_interval': LaunchConfiguration('waypoint_reconnect_interval'),
             'connection_timeout': LaunchConfiguration('waypoint_connection_timeout'),
             'auto_reconnect': True,
-            'socket_buffer_size': 262144,
-            'socket_timeout': 0.5,
+            'socket_buffer_size': 262144,  # Increased buffer size for better data handling
+            'socket_timeout': 1.0,  # Increased timeout for more reliable connections
             'enable_tcp_nodelay': True,
             'enable_socket_keepalive': True,
             'verbose_logging': True,
@@ -961,6 +961,8 @@ def generate_launch_description():
             'persistent_markers': LaunchConfiguration('persistent_markers'),
             'clear_markers_on_update': False,  # Don't clear previous markers when new ones arrive
             'use_persistent_durability': True,  # Use persistent durability for markers
+            'debug_mode': True,  # Enable debug mode for more detailed logging
+            'publish_even_without_data': True,  # Publish empty maps even if no waypoint data is received
         }],
         output='screen'
     )
@@ -976,15 +978,19 @@ def generate_launch_description():
             'map_width_meters': LaunchConfiguration('map_width_meters'),
             'map_height_meters': LaunchConfiguration('map_height_meters'),
             'map_frame_id': 'waypoint_frame',  # Use waypoint_frame for consistency
-            'publish_rate': LaunchConfiguration('publish_rate'),
+            'publish_rate': 10.0,  # Increased publish rate for more frequent updates
             'waypoint_marker_topic': '/carla/waypoint_markers',
             'binary_topic': LaunchConfiguration('waypoint_binary_topic'),
             'occupied_value': LaunchConfiguration('occupied_value'),
             'free_value': LaunchConfiguration('free_value'),
-            'waypoint_width': LaunchConfiguration('waypoint_width'),
+            'waypoint_width': 2.0,  # Increased width for better visibility
             'use_vehicle_frame': False,  # Don't center on vehicle
             'map_origin_x': LaunchConfiguration('map_origin_x'),
             'map_origin_y': LaunchConfiguration('map_origin_y'),
+            'verbose_logging': True,  # Enable verbose logging
+            'publish_empty_map': True,  # Publish an empty map even if no waypoints are available
+            'use_transient_local_durability': True,  # Use transient local durability for better reliability
+            'always_republish': True,  # Always republish the map even if there are no changes
         }],
         output='screen'
     )

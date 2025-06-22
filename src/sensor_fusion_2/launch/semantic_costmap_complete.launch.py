@@ -153,7 +153,7 @@ def generate_launch_description():
     # Classification parameters
     declare_ground_height_threshold = DeclareLaunchArgument(
         'ground_height_threshold',
-        default_value='0.3',  # Unchanged
+        default_value='0.05',  # Reduced to 0.05 to better differentiate between ground and low-profile cars
         description='Maximum height for ground classification (meters)'
     )
     
@@ -171,14 +171,14 @@ def generate_launch_description():
     
     declare_dynamic_velocity_threshold = DeclareLaunchArgument(
         'dynamic_velocity_threshold',
-        default_value='1.5',  # Unchanged
+        default_value='0.1',  # Changed to minimum allowed value (0.1) to detect objects with minimal velocity
         description='Minimum velocity for dynamic classification (m/s)'
     )
     
     # Layer weight parameters - Updated based on test2.yaml
     declare_ground_weight = DeclareLaunchArgument(
         'ground_weight',
-        default_value='0.0',  # Keep at 0.0
+        default_value='5.0',  # Changed from 0.0 to 5.0 to include ground in the combined map
         description='Weight of ground layer in combined map'
     )
     
@@ -282,7 +282,7 @@ def generate_launch_description():
     # Add parameters for binary output map
     declare_binary_threshold = DeclareLaunchArgument(
         'binary_threshold',
-        default_value='0.05',  # Reduced threshold even further to immediately mark cells as obstacles
+        default_value='0.3',  # Increased from 0.05 to 0.3 for more precise obstacle classification
         description='Threshold value for binary obstacle classification'
     )
     
@@ -380,6 +380,44 @@ def generate_launch_description():
         description='Topic name for publishing comprehensive binary map with all objects'
     )
     
+    # Add a new parameter for low car detection
+    declare_low_car_height_threshold = DeclareLaunchArgument(
+        'low_car_height_threshold',
+        default_value='0.03',  # Threshold for detecting low-profile cars (3cm)
+        description='Minimum height for low-profile car detection (meters)'
+    )
+    
+    declare_car_detection_width = DeclareLaunchArgument(
+        'car_detection_width',
+        default_value='0.5',  # Minimum width for car detection (50cm)
+        description='Minimum width for car detection (meters)'
+    )
+
+    declare_enhance_low_cars = DeclareLaunchArgument(
+        'enhance_low_cars',
+        default_value='true',
+        description='Enhance detection of low-profile cars'
+    )
+    
+    # Add new parameters for object expansion control
+    declare_car_expansion_radius = DeclareLaunchArgument(
+        'car_expansion_radius',
+        default_value='2.0',  # Reduced from 3.0 to 2.0 for even smaller car expansion
+        description='Expansion radius for cars in cells'
+    )
+
+    declare_obstacle_expansion_radius = DeclareLaunchArgument(
+        'obstacle_expansion_radius',
+        default_value='0.5',  # Reduced from 1.0 to 0.5 for minimal obstacle expansion
+        description='Expansion radius for obstacles in cells'
+    )
+
+    declare_dynamic_expansion_radius = DeclareLaunchArgument(
+        'dynamic_expansion_radius',
+        default_value='1.0',  # Reduced from 2.0 to 1.0 for smaller dynamic object expansion
+        description='Expansion radius for dynamic objects in cells'
+    )
+    
     # ==================== TF TREE CONFIGURATION ====================
     # Root transform: world to map
     world_to_map_node = Node(
@@ -423,12 +461,12 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='tf_base_to_radar',
         arguments=[
-            '1.5',  # X offset (forward from base)
+            '0.0',  # X offset (forward from base)
             '0.0',  # Y offset (left/right)
-            '1.0',  # Z offset (up from base) - radar is 1m above the base
+            '1.9',  # Z offset (up from base) - radar is 1m above the base
             '0',    # Roll - aligned with vehicle
-            '0',    # Pitch - aligned with vehicle
-            '0',    # Yaw - adjusted to align with LiDAR view
+            '0.0', # Pitch - increased downward angle (about 8.5 degrees) to improve ground coverage
+            '0',    # Yaw - aligned with vehicle
             'base_link', 
             'radar_link'
         ],
@@ -494,7 +532,7 @@ def generate_launch_description():
             'point_size': 0.2,
             'use_advanced_coloring': True,
             'velocity_arrow_scale': 1.0,
-            'min_velocity_for_display': 0.1,
+            'min_velocity_for_display': 0.0,  # Set to 0.0 to display all objects regardless of velocity
             'max_velocity_for_display': 30.0,
             'frame_id': 'radar_link',
             'map_frame_id': 'map',
@@ -505,12 +543,12 @@ def generate_launch_description():
             'static_objects_topic': '/radar/static_objects',
             'object_tracking_topic': '/radar/object_tracking',
             'min_points_per_cluster': 1,  # Keep at 1 to detect sparse clusters
-            'cluster_distance_threshold': 1.0,
-            'static_velocity_threshold': 0.2,
-            'moving_velocity_threshold': 0.5,
+            'cluster_distance_threshold': 0.4,  # Keep at 0.4 for precise clustering
+            'static_velocity_threshold': 0.0,  # Set to 0.0 to detect all objects regardless of velocity
+            'moving_velocity_threshold': 0.0,  # Set to 0.0 to consider any movement as a moving object
             'use_dbscan_clustering': True,
-            'dbscan_epsilon': 1.0,
-            'dbscan_min_samples': 2,
+            'dbscan_epsilon': 0.7,  # Further reduced from 0.8 to 0.7 for tighter clustering
+            'dbscan_min_samples': 1,  # Keep at 1 to detect even single-point cars
             'track_objects': True,
             'max_tracking_age': LaunchConfiguration('max_tracking_age'),
             'min_track_confidence': 0.6,
@@ -552,26 +590,27 @@ def generate_launch_description():
             'moving_objects_topic': '/radar/moving_objects',  # Unchanged
             'static_objects_topic': '/radar/static_objects',  # Unchanged
             'object_tracking_topic': '/radar/object_tracking',  # Unchanged
-            'min_points_per_cluster': 1,  # Keep at 1 to detect sparse clusters
-            'cluster_distance_threshold': 1.0,  # Increased from 0.0 to 1.0 to better group points
-            'static_velocity_threshold': 0.2,  # Increased from 0.0 to 0.2
-            'moving_velocity_threshold': 0.5,  # Increased from 0.0 to 0.5
+            'min_points_per_cluster': 1,  # Keep at 1 to detect sparse clusters from low-profile cars
+            'cluster_distance_threshold': 0.8,  # Increased from 0.7 to 0.8 for better clustering of small objects
+            'static_velocity_threshold': 0.0,  # Set to 0.0 to detect all objects regardless of velocity
+            'moving_velocity_threshold': 0.0,  # Set to 0.0 to consider any movement as a moving object
             'use_dbscan_clustering': True,  # Unchanged
-            'dbscan_epsilon': 1.0,  # Increased from 0.7 to 1.0
-            'dbscan_min_samples': 2,  # Reduced from 3 to 2
+            'dbscan_epsilon': 0.8,  # Increased from 0.7 to 0.8 for better clustering of low-profile cars
+            'dbscan_min_samples': 1,  # Keep at 1 to detect even single-point low-profile cars
             'track_objects': True,  # Unchanged
-            'max_tracking_age': LaunchConfiguration('max_tracking_age'),  # Updated to use launch argument
-            'min_track_confidence': 0.6,  # Unchanged
-            'verbose_logging': True,  # Changed from False to True
-            'publish_rate': 60.0,  # Reduced from 100.0 to 60.0 Hz for more stable processing
-            'moving_object_color_r': 1.0,  # Added from test1_radar.yaml
-            'moving_object_color_g': 0.0,  # Added from test1_radar.yaml
-            'moving_object_color_b': 0.0,  # Added from test1_radar.yaml
-            'moving_object_color_a': 0.8,  # Added from test1_radar.yaml
-            'static_object_color_r': 0.0,  # Added from test1_radar.yaml
-            'static_object_color_g': 0.0,  # Added from test1_radar.yaml
-            'static_object_color_b': 1.0,  # Added from test1_radar.yaml
-            'static_object_color_a': 0.8,  # Added from test1_radar.yaml
+            'max_tracking_age': 0.3,  # Increased from 0.2 to 0.3 for better tracking of intermittent detections
+            'min_track_confidence': 0.5,  # Reduced from 0.6 to 0.5 to maintain tracking of low-confidence detections
+            'verbose_logging': True,  # Keep enabled for debugging
+            'publish_rate': 60.0,  # Keep at 60.0 Hz for responsive updates
+            'moving_object_color_r': 1.0,  # Unchanged
+            'moving_object_color_g': 0.0,  # Unchanged
+            'moving_object_color_b': 0.0,  # Unchanged
+            'moving_object_color_a': 0.8,  # Unchanged
+            'static_object_color_r': 0.0,  # Unchanged
+            'static_object_color_g': 0.0,  # Unchanged
+            'static_object_color_b': 1.0,  # Unchanged
+            'static_object_color_a': 0.8,  # Unchanged
+            'marker_lifetime': 0.2,  # Increased from 0.1 to 0.2 for better visualization
         }]
     )
     
@@ -609,16 +648,16 @@ def generate_launch_description():
             'map_frame': LaunchConfiguration('map_frame_id'),
             'radar_topic': '/radar/points',
             'map_topic': '/radar/map',
-            'publish_rate': 30.0,  # Reduced from 60.0 to 30.0 for more stable map updates
-            'use_velocity_filter': True,
+            'publish_rate': 30.0,  # Keep at 30.0 for stable map updates
+            'use_velocity_filter': False,  # Keep disabled to include all points regardless of velocity
             'use_temporal_filtering': True,
-            'min_velocity': 0.0,  # From test2_radar.yaml
-            'cell_memory': LaunchConfiguration('cell_memory'),  # Using updated launch argument
-            'obstacle_threshold': 0.0,  # From test2_radar.yaml
-            'free_threshold': -0.2,
+            'min_velocity': 0.0,  # Keep at 0.0 to detect even stationary objects
+            'cell_memory': 0.3,  # Increased from current value to 0.3 for better persistence of detected objects
+            'obstacle_threshold': 0.0,  # Keep at minimum to detect all objects
+            'free_threshold': -0.3,  # Reduced from -0.2 to -0.3 to be more conservative about marking cells as free
             'start_type_description_service': True,
-            'enable_fusion_layer': True,  # Added from test2_radar.yaml
-            'obstacle_value': 100,  # Added from test2_radar.yaml
+            'enable_fusion_layer': True,  # Keep enabled
+            'obstacle_value': 100,  # Maximum obstacle value
             'publish_to_realtime_map': True,  # Added from test2_radar.yaml
             'realtime_map_topic': '/realtime_map',  # Added from test2_radar.yaml
             'use_reliable_qos': True,  # Added from test2_radar.yaml
@@ -651,7 +690,7 @@ def generate_launch_description():
             'ground_height_threshold': LaunchConfiguration('ground_height_threshold'),
             'vegetation_height_ratio': LaunchConfiguration('vegetation_height_ratio'),
             'building_width_threshold': LaunchConfiguration('building_width_threshold'),
-            'dynamic_velocity_threshold': LaunchConfiguration('dynamic_velocity_threshold'),
+            'dynamic_velocity_threshold': 0.1,  # Set to minimum allowed value (0.1) to detect objects with minimal velocity
             'ground_weight': LaunchConfiguration('ground_weight'),
             'obstacle_weight': LaunchConfiguration('obstacle_weight'),
             'vegetation_weight': LaunchConfiguration('vegetation_weight'),
@@ -668,7 +707,9 @@ def generate_launch_description():
             'free_value': 0,
             'binary_threshold': LaunchConfiguration('binary_threshold'),
             'convert_vegetation_to_occupied': True,  # Explicitly convert vegetation to occupied
-            'convert_all_non_ground_to_occupied': True,  # All non-ground objects become obstacles
+            'convert_all_non_ground_to_occupied': True,  # Changed from False to True - mark all non-ground as occupied
+            'include_ground_in_binary': True,  # New parameter to explicitly include ground in binary map
+            'ground_as_occupied': False,  # Changed from True to False - don't mark ground as occupied
             
             # Enhanced binary map with all objects
             'enable_enhanced_binary_map': LaunchConfiguration('enhanced_binary_map'),
@@ -688,6 +729,16 @@ def generate_launch_description():
             'save_binary_map': LaunchConfiguration('save_binary_map'),
             'save_combined_map': LaunchConfiguration('save_combined_map'),
             'save_layer_maps': LaunchConfiguration('save_layer_maps'),
+            
+            # Add new parameters for low car detection
+            'enhance_low_cars': LaunchConfiguration('enhance_low_cars'),
+            'low_car_height_threshold': LaunchConfiguration('low_car_height_threshold'),
+            'car_detection_width': LaunchConfiguration('car_detection_width'),
+            
+            # Add new parameters for object expansion control
+            'car_expansion_radius': LaunchConfiguration('car_expansion_radius'),
+            'obstacle_expansion_radius': LaunchConfiguration('obstacle_expansion_radius'),
+            'dynamic_expansion_radius': LaunchConfiguration('dynamic_expansion_radius'),
         }],
         output='screen'
     )
@@ -776,6 +827,16 @@ def generate_launch_description():
         declare_save_binary_map,
         declare_save_combined_map,
         declare_save_layer_maps,
+        
+        # Add new parameters for low car detection
+        declare_low_car_height_threshold,
+        declare_car_detection_width,
+        declare_enhance_low_cars,
+        
+        # Add new parameters for object expansion control
+        declare_car_expansion_radius,
+        declare_obstacle_expansion_radius,
+        declare_dynamic_expansion_radius,
         
         # TF Tree Nodes - Launch these first to establish the TF tree
         world_to_map_node,
