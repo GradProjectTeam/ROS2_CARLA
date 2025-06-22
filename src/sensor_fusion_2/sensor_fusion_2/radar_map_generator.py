@@ -233,20 +233,19 @@ class RadarMapGenerator(Node):
                     cell_x, cell_y = cell
                     
                     # Calculate evidence based on velocity with higher weights for moving objects
-                    # Use MUCH more aggressive evidence values to ensure visibility
-                    if abs(velocity) > 0.5:  # Any significant movement
-                        evidence = 1.0  # Maximum evidence for ANY moving object
-                        # Log detection of moving object
+                    # CRITICAL: Set maximum evidence for ALL points regardless of velocity
+                    evidence = 1.0  # Maximum evidence for ALL objects regardless of velocity
+                    
+                    # Log detection if velocity is significant
+                    if abs(velocity) > 0.1:
                         self.get_logger().info(f'Moving object detected at ({map_x:.2f}, {map_y:.2f}) with velocity {velocity:.2f}')
-                    else:  # Even for slow/stationary objects
-                        evidence = 0.9  # Increased from 0.8 to 0.9 for better visibility of slow-moving objects
                     
                     # Accumulate evidence in temporary grid
                     temp_grid[cell_y, cell_x] = 1.0  # Force maximum evidence in the cell
                     
                     # Also mark neighboring cells with reduced evidence for better visibility
                     # Use a MUCH larger neighborhood for better visibility
-                    radius = 8  # Increased from 5 to 8 for even better visibility
+                    radius = 30  # Increased from 8 to 10 for even better visibility of small objects
                     for dy in range(-radius, radius+1):
                         for dx in range(-radius, radius+1):
                             nx, ny = cell_x + dx, cell_y + dy
@@ -255,7 +254,7 @@ class RadarMapGenerator(Node):
                                 # Use distance-based evidence reduction with higher minimum
                                 dist = math.sqrt(dx*dx + dy*dy)
                                 if dist <= radius:  # Only within radius
-                                    neighbor_evidence = evidence * max(0.6, 1.0 - (dist/radius))  # Increased minimum from 0.5 to 0.6
+                                    neighbor_evidence = evidence * max(0.7, 1.0 - (dist/radius))  # Increased minimum from 0.6 to 0.7
                                     temp_grid[ny, nx] = max(temp_grid[ny, nx], neighbor_evidence)
             
             # Now update the actual grid with accumulated evidence

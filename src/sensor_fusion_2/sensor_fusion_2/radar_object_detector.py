@@ -38,16 +38,16 @@ class RadarObjectDetector(Node):
             ('moving_objects_topic', '/radar/moving_objects'),
             ('static_objects_topic', '/radar/static_objects'),
             ('object_tracking_topic', '/radar/object_tracking'),
-            ('min_points_per_cluster', 3),
-            ('cluster_distance_threshold', 0.8),
-            ('static_velocity_threshold', 0.5),
-            ('moving_velocity_threshold', 1.0),
+            ('min_points_per_cluster', 1),
+            ('cluster_distance_threshold', 1.5),
+            ('static_velocity_threshold', 0.0),
+            ('moving_velocity_threshold', 0.0),
             ('use_dbscan_clustering', True),
-            ('dbscan_epsilon', 0.7),
-            ('dbscan_min_samples', 3),
+            ('dbscan_epsilon', 1.5),
+            ('dbscan_min_samples', 1),
             ('track_objects', True),
-            ('max_tracking_age', 2.0),
-            ('min_track_confidence', 0.6),
+            ('max_tracking_age', 3.0),
+            ('min_track_confidence', 0.3),
             ('moving_object_color_r', 1.0),
             ('moving_object_color_g', 0.0),
             ('moving_object_color_b', 0.0),
@@ -58,7 +58,7 @@ class RadarObjectDetector(Node):
             ('static_object_color_a', 0.8),
             ('verbose_logging', True),
             ('marker_lifetime', 0.5),
-            ('publish_rate', 10.0)
+            ('publish_rate', 30.0)
         ])
         
         # Get parameters
@@ -198,27 +198,25 @@ class RadarObjectDetector(Node):
             static_objects = []
             
             for obj in objects:
-                # Vehicles or objects with sufficient velocity are marked as moving
-                if obj.get('is_vehicle', False) or obj['avg_velocity'] > self.moving_velocity_threshold:
+                # MODIFIED: Always classify vehicles as moving objects regardless of velocity
+                # This ensures all cars are detected and tracked even with minimal relative velocity
+                if obj.get('is_vehicle', False):
                     obj['type'] = 'moving'
                     moving_objects.append(obj)
-                elif obj['avg_velocity'] <= self.static_velocity_threshold:
+                    
+                    # Log detection of vehicles
+                    if self.verbose_logging:
+                        is_low_profile = obj.get('is_low_profile', False)
+                        car_type = "low-profile car" if is_low_profile else "vehicle"
+                        self.get_logger().debug(f"Detected {car_type}: vel={obj['avg_velocity']:.2f}, points={obj['num_points']}")
+                
+                # For non-vehicle objects, use velocity-based classification
+                elif obj['avg_velocity'] > 0.1:  # Reduced threshold to detect more moving objects
+                    obj['type'] = 'moving'
+                    moving_objects.append(obj)
+                else:
                     obj['type'] = 'static'
                     static_objects.append(obj)
-                else:
-                    # Objects with velocity between thresholds are considered uncertain
-                    # We'll classify them based on their previous classification if tracked
-                    if self.track_objects and 'id' in obj and obj['id'] in self.tracked_objects:
-                        prev_type = self.tracked_objects[obj['id']]['type']
-                        obj['type'] = prev_type
-                        if prev_type == 'moving':
-                            moving_objects.append(obj)
-                        else:
-                            static_objects.append(obj)
-                    else:
-                        # Default to static for uncertain objects
-                        obj['type'] = 'static'
-                        static_objects.append(obj)
             
             # Track objects over time if enabled
             if self.track_objects:
@@ -231,7 +229,9 @@ class RadarObjectDetector(Node):
             
             if self.verbose_logging:
                 vehicle_count = sum(1 for obj in objects if obj.get('is_vehicle', False))
-                self.get_logger().info(f'Detected {len(moving_objects)} moving and {len(static_objects)} static objects, including {vehicle_count} vehicles')
+                low_profile_count = sum(1 for obj in objects if obj.get('is_low_profile', False))
+                self.get_logger().info(f"Detected {len(moving_objects)} moving and {len(static_objects)} static objects, "
+                                      f"including {vehicle_count} vehicles ({low_profile_count} low-profile)")
                 
         except Exception as e:
             self.get_logger().error(f'Error in process_and_publish: {str(e)}')
@@ -241,17 +241,55 @@ class RadarObjectDetector(Node):
         if not points:
             return []
             
-        if len(points) < self.min_points_per_cluster:
-            return []
-            
+        # MODIFIED: Always process points even if there's just one
+        # This ensures we don't miss any potential car detections
+        
         # Extract point coordinates for clustering
         point_coords = np.array([[p['x'], p['y'], p['z']] for p in points])
         
         clusters = []
         
         if self.use_dbscan_clustering:
-            # Use DBSCAN for clustering
-            dbscan = DBSCAN(eps=self.dbscan_epsilon, min_samples=self.dbscan_min_samples)
+            # MODIFIED: Always use adaptive clustering with more sensitive parameters
+            # for better detection of low-profile cars
+            
+            # For very small point clouds, use very lenient parameters
+            if len(points) < 5:
+                # With very few points, use maximum epsilon and minimum samples
+                dbscan = DBSCAN(eps=2.0, min_samples=1)
+                self.get_logger().debug(f"Using very lenient clustering for {len(points)} points: eps=2.0, min_samples=1")
+            else:
+                # Calculate average distance between points
+                distances = []
+                for i in range(min(100, len(points))):  # Limit computation for large point clouds
+                    p1 = point_coords[i]
+                    for j in range(i+1, min(100, len(points))):
+                        p2 = point_coords[j]
+                        dist = np.linalg.norm(p1 - p2)
+                        distances.append(dist)
+                
+                if distances:
+                    # Calculate statistics
+                    avg_dist = np.mean(distances)
+                    min_dist = np.min(distances)
+                    
+                    # Adjust epsilon based on point distribution
+                    # Always use more lenient parameters than the defaults
+                    adaptive_epsilon = max(1.0, self.dbscan_epsilon * 1.5)
+                    adaptive_min_samples = 1  # Always use minimum samples of 1
+                    
+                    if avg_dist > 1.0:  # Points are far apart
+                        adaptive_epsilon = min(3.0, self.dbscan_epsilon * 2.0)  # Increase epsilon even more, max 3.0
+                    
+                    self.get_logger().debug(f"Adaptive clustering: epsilon={adaptive_epsilon:.2f}, min_samples={adaptive_min_samples}, avg_dist={avg_dist:.2f}")
+                    
+                    # Use DBSCAN with adaptive parameters
+                    dbscan = DBSCAN(eps=adaptive_epsilon, min_samples=adaptive_min_samples)
+                else:
+                    # Fallback to lenient parameters
+                    dbscan = DBSCAN(eps=1.5, min_samples=1)
+            
+            # Run clustering
             cluster_labels = dbscan.fit_predict(point_coords)
             
             # Group points by cluster
@@ -267,15 +305,12 @@ class RadarObjectDetector(Node):
                 
             # Create object for each cluster
             for label, cluster_points in cluster_dict.items():
-                if len(cluster_points) < self.min_points_per_cluster:
-                    continue
-                    
-                # Calculate cluster properties
+                # MODIFIED: Process all clusters, even with a single point
                 obj = self.calculate_object_properties(cluster_points)
                 clusters.append(obj)
                 
         else:
-            # Simple distance-based clustering
+            # Enhanced simple distance-based clustering
             remaining_points = points.copy()
             
             while remaining_points:
@@ -290,7 +325,11 @@ class RadarObjectDetector(Node):
                     # Check if point is close to any point in the current cluster
                     for cp in current_cluster:
                         dist = math.sqrt((p['x'] - cp['x'])**2 + (p['y'] - cp['y'])**2 + (p['z'] - cp['z'])**2)
-                        if dist <= self.cluster_distance_threshold:
+                        
+                        # MODIFIED: Always use a larger threshold for better clustering
+                        adaptive_threshold = max(1.0, self.cluster_distance_threshold * 2.0)
+                        
+                        if dist <= adaptive_threshold:
                             current_cluster.append(p)
                             remaining_points.pop(i)
                             i -= 1
@@ -298,10 +337,9 @@ class RadarObjectDetector(Node):
                     
                     i += 1
                 
-                # Create object from cluster if it has enough points
-                if len(current_cluster) >= self.min_points_per_cluster:
-                    obj = self.calculate_object_properties(current_cluster)
-                    clusters.append(obj)
+                # MODIFIED: Process all clusters, even with a single point
+                obj = self.calculate_object_properties(current_cluster)
+                clusters.append(obj)
         
         return clusters
     
@@ -329,25 +367,53 @@ class RadarObjectDetector(Node):
         raw_size_y = max(0.1, y_max - y_min)
         raw_size_z = max(0.1, z_max - z_min)
         
-        # Check if dimensions are plausible for a car
-        # Most cars are around 4-5m long, 1.7-2m wide, 1.5-2m high
+        # MODIFIED: Enhanced vehicle detection with more lenient criteria for all cars
         is_vehicle = False
-        if len(cluster_points) >= 3:  # Need enough points to make a good estimate
-            if (1.5 <= raw_size_x <= 6.0 and 1.5 <= raw_size_y <= 3.0) or \
-               (1.5 <= raw_size_y <= 6.0 and 1.5 <= raw_size_x <= 3.0):
+        is_low_profile = False
+        
+        # Require only a single point for potential car detection
+        if len(cluster_points) >= 1:
+            # Check for standard vehicles - wider range of dimensions
+            if (0.3 <= raw_size_x <= 7.0 and 0.3 <= raw_size_y <= 3.5) or \
+               (0.3 <= raw_size_y <= 7.0 and 0.3 <= raw_size_x <= 3.5):
                 is_vehicle = True
+                
+                # Identify if it's a low-profile car
+                if raw_size_z <= 1.5:
+                    is_low_profile = True
+                    self.get_logger().debug(f"Detected low-profile vehicle: size={raw_size_x:.2f}x{raw_size_y:.2f}x{raw_size_z:.2f}m")
+            
+            # Special check for very small returns that might be from distant cars
+            elif (0.1 <= raw_size_x <= 1.0 and 0.1 <= raw_size_y <= 1.0):
+                # Small objects that might be cars at a distance
+                is_vehicle = True
+                is_low_profile = True
+                self.get_logger().debug(f"Detected potential distant vehicle: size={raw_size_x:.2f}x{raw_size_y:.2f}x{raw_size_z:.2f}m")
         
         # Set size - use vehicle dimensions if detected, otherwise ensure minimum size
         if is_vehicle:
             # Use typical vehicle dimensions - helps when only partial points are detected
             # Choose the larger dimension as the length
             if raw_size_x > raw_size_y:
-                size_x = max(raw_size_x, 4.0)  # Ensure minimum length
-                size_y = max(raw_size_y, 1.7)  # Ensure minimum width
+                if is_low_profile:
+                    size_x = max(raw_size_x, 2.0)  # Even smaller minimum length for low-profile cars
+                    size_y = max(raw_size_y, 1.2)  # Even smaller minimum width for low-profile cars
+                else:
+                    size_x = max(raw_size_x, 4.0)  # Standard minimum length
+                    size_y = max(raw_size_y, 1.7)  # Standard minimum width
             else:
-                size_x = max(raw_size_x, 1.7)  # Ensure minimum width
-                size_y = max(raw_size_y, 4.0)  # Ensure minimum length
-            size_z = max(raw_size_z, 1.5)  # Ensure minimum height
+                if is_low_profile:
+                    size_x = max(raw_size_x, 1.2)  # Even smaller minimum width for low-profile cars
+                    size_y = max(raw_size_y, 2.0)  # Even smaller minimum length for low-profile cars
+                else:
+                    size_x = max(raw_size_x, 1.7)  # Standard minimum width
+                    size_y = max(raw_size_y, 4.0)  # Standard minimum length
+            
+            # Adjust height for low-profile vehicles
+            if is_low_profile:
+                size_z = max(raw_size_z, 0.2)  # Even lower minimum height for low-profile cars
+            else:
+                size_z = max(raw_size_z, 0.5)  # Standard minimum height
         else:
             # Use minimum size for non-vehicle objects
             size_x = max(0.3, raw_size_x)  # Minimum size of 0.3m
@@ -358,9 +424,8 @@ class RadarObjectDetector(Node):
         velocities = [abs(float(p['velocity'])) for p in cluster_points]
         avg_velocity = sum(velocities) / len(velocities)
         
-        # For vehicles, even low velocities are significant
-        if is_vehicle and 0.1 <= avg_velocity <= 0.5:
-            avg_velocity = max(avg_velocity, 0.5)  # Boost low velocities for vehicles
+        # MODIFIED: Don't boost velocities, just record the actual values
+        # We'll classify all vehicles as moving regardless of velocity
         
         # Calculate velocity vector (simplified)
         vx = 0.0
@@ -402,7 +467,8 @@ class RadarObjectDetector(Node):
             'num_points': len(cluster_points),
             'timestamp': time.time(),
             'points': cluster_points,
-            'is_vehicle': is_vehicle  # Add vehicle flag
+            'is_vehicle': is_vehicle,  # Add vehicle flag
+            'is_low_profile': is_low_profile  # Add low-profile flag
         }
         
         return obj
@@ -419,6 +485,11 @@ class RadarObjectDetector(Node):
             best_match_id = None
             best_match_dist = float('inf')
             
+            # Determine association distance threshold based on object type
+            # Use larger threshold for low-profile cars to improve tracking
+            is_low_profile = obj.get('is_low_profile', False)
+            max_association_distance = 3.0 if is_low_profile else 2.0  # Larger threshold for low-profile cars
+            
             for obj_id, tracked_obj in self.tracked_objects.items():
                 # Skip if this tracked object was already matched
                 if obj_id in matched_ids:
@@ -431,16 +502,28 @@ class RadarObjectDetector(Node):
                 dist = math.sqrt(dx*dx + dy*dy + dz*dz)
                 
                 # Check if this is a potential match
-                if dist < best_match_dist and dist < 2.0:  # Maximum association distance
-                    best_match_id = obj_id
-                    best_match_dist = dist
+                # For low-profile cars, also consider if the tracked object was a low-profile car
+                if dist < best_match_dist and dist < max_association_distance:
+                    # If both are low-profile cars or both are not, prefer this match
+                    if is_low_profile == tracked_obj.get('is_low_profile', False):
+                        best_match_id = obj_id
+                        best_match_dist = dist
+                    # Otherwise, only match if no better match has been found
+                    elif best_match_id is None:
+                        best_match_id = obj_id
+                        best_match_dist = dist
             
             if best_match_id is not None:
                 # Update the tracked object
                 tracked_obj = self.tracked_objects[best_match_id]
                 
                 # Update position with some smoothing
-                alpha = 0.7  # Weight for new measurement
+                # Use different smoothing factor based on object type
+                if is_low_profile:
+                    alpha = 0.8  # Higher weight for new measurements of low-profile cars
+                else:
+                    alpha = 0.7  # Standard weight for regular objects
+                
                 obj['center']['x'] = alpha * obj['center']['x'] + (1-alpha) * tracked_obj['center']['x']
                 obj['center']['y'] = alpha * obj['center']['y'] + (1-alpha) * tracked_obj['center']['y']
                 obj['center']['z'] = alpha * obj['center']['z'] + (1-alpha) * tracked_obj['center']['z']
@@ -452,7 +535,13 @@ class RadarObjectDetector(Node):
                 obj['id'] = best_match_id
                 obj['track_age'] = current_time - tracked_obj['first_seen']
                 obj['first_seen'] = tracked_obj['first_seen']
-                obj['confidence'] = min(1.0, tracked_obj['confidence'] + 0.1)  # Increase confidence
+                
+                # Update confidence - boost confidence for low-profile cars
+                confidence_boost = 0.15 if is_low_profile else 0.1
+                obj['confidence'] = min(1.0, tracked_obj['confidence'] + confidence_boost)
+                
+                # Preserve low-profile flag if it was set in either object
+                obj['is_low_profile'] = is_low_profile or tracked_obj.get('is_low_profile', False)
                 
                 # Update tracked object
                 self.tracked_objects[best_match_id] = obj
@@ -465,7 +554,10 @@ class RadarObjectDetector(Node):
                 obj['id'] = obj_id
                 obj['first_seen'] = current_time
                 obj['track_age'] = 0.0
-                obj['confidence'] = 0.5  # Initial confidence
+                
+                # Set initial confidence based on object type
+                # Higher initial confidence for low-profile cars to prevent early removal
+                obj['confidence'] = 0.6 if is_low_profile else 0.5
                 
                 self.tracked_objects[obj_id] = obj
         
@@ -475,13 +567,27 @@ class RadarObjectDetector(Node):
             if obj_id not in matched_ids:
                 # Object wasn't matched in this update
                 age = current_time - tracked_obj['timestamp']
-                if age > self.max_tracking_age:
+                
+                # Use different tracking age thresholds based on object type
+                is_low_profile = tracked_obj.get('is_low_profile', False)
+                max_age = self.max_tracking_age * 1.5 if is_low_profile else self.max_tracking_age
+                
+                if age > max_age:
                     ids_to_remove.append(obj_id)
                 else:
                     # Decrease confidence for unmatched objects
-                    tracked_obj['confidence'] = max(0.0, tracked_obj['confidence'] - 0.1)
+                    # Decrease more slowly for low-profile cars
+                    confidence_decrease = 0.05 if is_low_profile else 0.1
+                    tracked_obj['confidence'] = max(0.0, tracked_obj['confidence'] - confidence_decrease)
+                    
+                    # Log when a low-profile car is about to be removed
+                    if is_low_profile and tracked_obj['confidence'] < 0.2:
+                        self.get_logger().debug(f"Low-profile car with ID {obj_id} has low confidence: {tracked_obj['confidence']:.2f}")
         
         for obj_id in ids_to_remove:
+            # Log when removing a tracked low-profile car
+            if self.tracked_objects[obj_id].get('is_low_profile', False):
+                self.get_logger().info(f"Removing tracked low-profile car with ID {obj_id}, age: {current_time - self.tracked_objects[obj_id]['timestamp']:.2f}s")
             del self.tracked_objects[obj_id]
     
     def publish_moving_objects(self, objects):
@@ -511,8 +617,16 @@ class RadarObjectDetector(Node):
             marker.scale.y = float(obj['size']['y'])
             marker.scale.z = float(obj['size']['z'])
             
-            # Set color (red for moving objects)
-            marker.color = self.moving_object_color
+            # Set color - use special color for low-profile cars
+            if obj.get('is_low_profile', False):
+                # Use bright orange for low-profile cars to make them more visible
+                marker.color.r = 1.0
+                marker.color.g = 0.5
+                marker.color.b = 0.0
+                marker.color.a = 0.9  # Higher alpha for better visibility
+            else:
+                # Standard red for regular moving objects
+                marker.color = self.moving_object_color
             
             # Set lifetime
             marker.lifetime.sec = int(self.marker_lifetime)
@@ -560,6 +674,42 @@ class RadarObjectDetector(Node):
                 arrow.lifetime.nanosec = int((self.marker_lifetime % 1) * 1e9)
                 
                 marker_array.markers.append(arrow)
+            
+            # For low-profile cars, add an additional marker to enhance visibility
+            if obj.get('is_low_profile', False):
+                # Add a sphere marker slightly above the car
+                sphere = Marker()
+                sphere.header.frame_id = self.map_frame_id
+                sphere.header.stamp = self.get_clock().now().to_msg()
+                sphere.ns = "low_profile_indicator"
+                sphere.id = i
+                sphere.type = Marker.SPHERE
+                sphere.action = Marker.ADD
+                
+                # Position slightly above the car
+                sphere.pose.position.x = float(obj['center']['x'])
+                sphere.pose.position.y = float(obj['center']['y'])
+                sphere.pose.position.z = float(obj['center']['z'] + obj['size']['z'] + 0.3)
+                
+                # Set orientation (identity quaternion)
+                sphere.pose.orientation.w = 1.0
+                
+                # Small sphere
+                sphere.scale.x = 0.4
+                sphere.scale.y = 0.4
+                sphere.scale.z = 0.4
+                
+                # Bright color for visibility
+                sphere.color.r = 1.0
+                sphere.color.g = 0.0
+                sphere.color.b = 1.0  # Purple
+                sphere.color.a = 0.9
+                
+                # Set lifetime
+                sphere.lifetime.sec = int(self.marker_lifetime)
+                sphere.lifetime.nanosec = int((self.marker_lifetime % 1) * 1e9)
+                
+                marker_array.markers.append(sphere)
         
         self.moving_objects_pub.publish(marker_array)
     
@@ -590,14 +740,58 @@ class RadarObjectDetector(Node):
             marker.scale.y = float(obj['size']['y'])
             marker.scale.z = float(obj['size']['z'])
             
-            # Set color (blue for static objects)
-            marker.color = self.static_object_color
+            # Set color - use special color for low-profile cars
+            if obj.get('is_low_profile', False):
+                # Use cyan for static low-profile cars
+                marker.color.r = 0.0
+                marker.color.g = 0.8
+                marker.color.b = 1.0
+                marker.color.a = 0.9  # Higher alpha for better visibility
+            else:
+                # Standard blue for regular static objects
+                marker.color = self.static_object_color
             
             # Set lifetime
             marker.lifetime.sec = int(self.marker_lifetime)
             marker.lifetime.nanosec = int((self.marker_lifetime % 1) * 1e9)
             
             marker_array.markers.append(marker)
+            
+            # For low-profile cars, add an additional marker to enhance visibility
+            if obj.get('is_low_profile', False):
+                # Add a sphere marker slightly above the car
+                sphere = Marker()
+                sphere.header.frame_id = self.map_frame_id
+                sphere.header.stamp = self.get_clock().now().to_msg()
+                sphere.ns = "low_profile_indicator_static"
+                sphere.id = i
+                sphere.type = Marker.SPHERE
+                sphere.action = Marker.ADD
+                
+                # Position slightly above the car
+                sphere.pose.position.x = float(obj['center']['x'])
+                sphere.pose.position.y = float(obj['center']['y'])
+                sphere.pose.position.z = float(obj['center']['z'] + obj['size']['z'] + 0.3)
+                
+                # Set orientation (identity quaternion)
+                sphere.pose.orientation.w = 1.0
+                
+                # Small sphere
+                sphere.scale.x = 0.4
+                sphere.scale.y = 0.4
+                sphere.scale.z = 0.4
+                
+                # Bright color for visibility
+                sphere.color.r = 0.0
+                sphere.color.g = 1.0
+                sphere.color.b = 1.0  # Cyan
+                sphere.color.a = 0.9
+                
+                # Set lifetime
+                sphere.lifetime.sec = int(self.marker_lifetime)
+                sphere.lifetime.nanosec = int((self.marker_lifetime % 1) * 1e9)
+                
+                marker_array.markers.append(sphere)
         
         self.static_objects_pub.publish(marker_array)
     

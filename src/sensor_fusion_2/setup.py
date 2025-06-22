@@ -44,6 +44,12 @@ setup(
             'semantic_costmap_visualizer = ' + package_name + '.semantic_costmap_visualizer:main',
             'tune_semantic_costmap = ' + package_name + '.tune_semantic_costmap:main',
             'autonomous_dwa_planner = ' + package_name + '.autonomous_dwa_planner:main',
+            'waypoint_listener = ' + package_name + '.waypoint_listener:main',
+            'waypoint_map_generator = ' + package_name + '.waypoint_map_generator:main',
+            'waypoint_visualizer = ' + package_name + '.waypoint_visualizer:main',
+            'waypoint_path_planner = ' + package_name + '.waypoint_path_planner:main',
+            'map_server = ' + package_name + '.map_server:main',
+            'binary_map_combiner = ' + package_name + '.binary_map_combiner:main',  
         ],
     },
 )

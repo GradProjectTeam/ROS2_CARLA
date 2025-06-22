@@ -19,8 +19,8 @@ import re
 from std_msgs.msg import Float32MultiArray
 
 # CARLA Radar Configuration
-CARLA_RADAR_HORIZONTAL_FOV = 10.0  # degrees
-CARLA_RADAR_VERTICAL_FOV = -15.0    # degrees
+CARLA_RADAR_HORIZONTAL_FOV = 15.0  # degrees
+CARLA_RADAR_VERTICAL_FOV = -20.0    # degrees
 CARLA_RADAR_RANGE = 100.0          # meters
 CARLA_RADAR_POINTS_PER_SECOND = 2000
 CARLA_RADAR_POSITION = [1.5, 0.5, 0.0]  # x, y, z relative to vehicle

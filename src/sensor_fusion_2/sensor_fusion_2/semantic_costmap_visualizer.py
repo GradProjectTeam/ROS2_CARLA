@@ -71,6 +71,10 @@ class SemanticCostmapVisualizer(Node):
         self.convert_vegetation_to_occupied = self.get_parameter('convert_vegetation_to_occupied').value
         self.convert_all_non_ground_to_occupied = self.get_parameter('convert_all_non_ground_to_occupied').value
         
+        # Add parameters for ground inclusion in binary map
+        self.include_ground_in_binary = self.get_parameter('include_ground_in_binary').value
+        self.ground_as_occupied = self.get_parameter('ground_as_occupied').value
+        
         # Add marker lifetime parameter
         self.marker_lifetime = self.get_parameter('marker_lifetime').value
         
@@ -82,6 +86,16 @@ class SemanticCostmapVisualizer(Node):
         self.save_combined_map = self.get_parameter('save_combined_map').value
         self.save_layer_maps = self.get_parameter('save_layer_maps').value
         self.last_save_time = time.time()
+        
+        # Add new parameters for low car detection
+        self.enhance_low_cars = self.get_parameter('enhance_low_cars').value
+        self.low_car_height_threshold = self.get_parameter('low_car_height_threshold').value
+        self.car_detection_width = self.get_parameter('car_detection_width').value
+        
+        # Get the expansion radius parameters
+        self.car_expansion_radius = self.get_parameter('car_expansion_radius').value
+        self.obstacle_expansion_radius = self.get_parameter('obstacle_expansion_radius').value
+        self.dynamic_expansion_radius = self.get_parameter('dynamic_expansion_radius').value
         
         # Create save directory if it doesn't exist
         if self.enable_map_saving:
@@ -237,7 +251,7 @@ class SemanticCostmapVisualizer(Node):
         self.get_logger().info(f'Temporal filtering running at 20 Hz to balance responsiveness and stability')
     
     def add_dynamic_parameters(self):
-        """Add parameters with descriptors for dynamic reconfigure"""
+        """Add dynamic parameters that can be reconfigured at runtime"""
         # Map parameters
         self.declare_parameter(
             'map_resolution', 
@@ -368,7 +382,7 @@ class SemanticCostmapVisualizer(Node):
             ParameterDescriptor(
                 description='Maximum height for ground classification (m)',
                 floating_point_range=[FloatingPointRange(
-                    from_value=0.1, 
+                    from_value=0.05,  # Changed from 0.1 to 0.05 to allow lower values for better low car detection
                     to_value=1.0, 
                     step=0.05
                 )]
@@ -552,6 +566,23 @@ class SemanticCostmapVisualizer(Node):
             )
         )
         
+        # Add parameters for ground inclusion in binary map
+        self.declare_parameter(
+            'include_ground_in_binary',
+            True,
+            ParameterDescriptor(
+                description='Include ground layer in the binary map'
+            )
+        )
+        
+        self.declare_parameter(
+            'ground_as_occupied',
+            True,
+            ParameterDescriptor(
+                description='Mark ground cells as occupied in binary map'
+            )
+        )
+        
         # Add map saving parameters
         self.declare_parameter(
             'enable_map_saving',
@@ -603,6 +634,81 @@ class SemanticCostmapVisualizer(Node):
             False,
             ParameterDescriptor(
                 description='Save individual layer maps'
+            )
+        )
+        
+        # Add parameters for low car detection
+        self.declare_parameter(
+            'enhance_low_cars', 
+            True,
+            ParameterDescriptor(
+                description='Enable enhanced detection of low-profile cars'
+            )
+        )
+        
+        self.declare_parameter(
+            'low_car_height_threshold', 
+            0.1,
+            ParameterDescriptor(
+                description='Minimum height for low-profile car detection (meters)',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.01, 
+                    to_value=0.5, 
+                    step=0.01
+                )]
+            )
+        )
+        
+        self.declare_parameter(
+            'car_detection_width', 
+            0.5,
+            ParameterDescriptor(
+                description='Minimum width for car detection (meters)',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.3, 
+                    to_value=3.0, 
+                    step=0.1
+                )]
+            )
+        )
+        
+        # Add parameters for object expansion control
+        self.declare_parameter(
+            'car_expansion_radius', 
+            2.0,
+            ParameterDescriptor(
+                description='Expansion radius for cars in cells',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.0, 
+                    to_value=10.0, 
+                    step=0.1
+                )]
+            )
+        )
+        
+        self.declare_parameter(
+            'obstacle_expansion_radius', 
+            0.5,
+            ParameterDescriptor(
+                description='Expansion radius for obstacles in cells',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.0, 
+                    to_value=5.0, 
+                    step=0.1
+                )]
+            )
+        )
+        
+        self.declare_parameter(
+            'dynamic_expansion_radius', 
+            1.0,
+            ParameterDescriptor(
+                description='Expansion radius for dynamic objects in cells',
+                floating_point_range=[FloatingPointRange(
+                    from_value=0.0, 
+                    to_value=5.0, 
+                    step=0.1
+                )]
             )
         )
     
@@ -755,6 +861,32 @@ class SemanticCostmapVisualizer(Node):
                 
             if param.name == 'save_layer_maps':
                 self.save_layer_maps = param.value
+            
+            # Add handling for new parameters
+            if param.name == 'enhance_low_cars':
+                self.enhance_low_cars = param.value
+                self.get_logger().info(f'Enhanced low car detection: {self.enhance_low_cars}')
+                
+            if param.name == 'low_car_height_threshold':
+                self.low_car_height_threshold = param.value
+                self.get_logger().info(f'Low car height threshold: {self.low_car_height_threshold}')
+                
+            if param.name == 'car_detection_width':
+                self.car_detection_width = param.value
+                self.get_logger().info(f'Car detection width: {self.car_detection_width}')
+            
+            # Handle expansion radius parameters
+            if param.name == 'car_expansion_radius':
+                self.car_expansion_radius = param.value
+                self.get_logger().info(f'Car expansion radius set to {self.car_expansion_radius}')
+                
+            if param.name == 'obstacle_expansion_radius':
+                self.obstacle_expansion_radius = param.value
+                self.get_logger().info(f'Obstacle expansion radius set to {self.obstacle_expansion_radius}')
+                
+            if param.name == 'dynamic_expansion_radius':
+                self.dynamic_expansion_radius = param.value
+                self.get_logger().info(f'Dynamic expansion radius set to {self.dynamic_expansion_radius}')
         
         # If map dimensions changed, reinitialize the costmap
         if map_changed:
@@ -898,36 +1030,29 @@ class SemanticCostmapVisualizer(Node):
                 
                 # CRITICAL: Treat ALL radar detections as high-priority dynamic objects
                 # Set extremely high velocity to ensure they're classified as dynamic
-                cluster['velocity'] = 10.0  # Very high velocity to ensure dynamic classification
+                cluster['velocity'] = 20.0  # Extremely high velocity to ensure dynamic classification
                 
                 # Set maximum confidence for all radar clusters
                 cluster['confidence'] = 1.0  # Maximum confidence
                 
-                # Check if object is car-sized (special handling for cars)
+                # Get dimensions
                 width = marker.scale.x
                 length = marker.scale.y
                 height = marker.scale.z
                 
-                # CRITICAL: More inclusive car detection - especially for lower cars
-                is_car = False
+                # CRITICAL: Treat EVERY radar detection as a car
+                # This ensures maximum visibility for all detected objects
+                is_car = True
                 
-                # Check for car-like dimensions with more inclusive height range
-                # Standard car dimensions: width 1.5-2.5m, length 3.5-6.0m, height 1.0-2.0m
-                if (
-                    # Check for typical car dimensions (width/length)
-                    ((1.0 <= width <= 3.0 and 2.0 <= length <= 6.0) or 
-                     (1.0 <= length <= 3.0 and 2.0 <= width <= 6.0)) and
-                    # Allow for lower-profile cars (height can be as low as 0.5m for sports cars)
-                    height <= 2.5
-                ):
-                    is_car = True
-                    self.get_logger().info(f'CAR DETECTED: size=({width:.2f}x{length:.2f}x{height:.2f}), position=({cluster["centroid"][0]:.2f}, {cluster["centroid"][1]:.2f})')
+                # Log detection based on dimensions
+                if max(width, length) >= 1.0:
+                    self.get_logger().info(f'LARGE OBJECT DETECTED: size=({width:.2f}x{length:.2f}x{height:.2f}), position=({cluster["centroid"][0]:.2f}, {cluster["centroid"][1]:.2f})')
+                else:
+                    self.get_logger().info(f'SMALL OBJECT DETECTED: size=({width:.2f}x{length:.2f}x{height:.2f}), position=({cluster["centroid"][0]:.2f}, {cluster["centroid"][1]:.2f})')
                 
-                # SPECIAL CASE: For very small objects that might be low-profile cars
-                # If object is small but has significant velocity, treat as a car
-                elif max(width, length) >= 0.8 and height <= 1.0:
-                    is_car = True
-                    self.get_logger().info(f'LOW-PROFILE CAR DETECTED: size=({width:.2f}x{length:.2f}x{height:.2f}), position=({cluster["centroid"][0]:.2f}, {cluster["centroid"][1]:.2f})')
+                # Determine if object is seen from side (width > length)
+                is_side_view = width > length
+                cluster['is_side_view'] = is_side_view
                 
                 cluster['is_car'] = is_car
                 clusters.append(cluster)
@@ -952,52 +1077,87 @@ class SemanticCostmapVisualizer(Node):
             self.get_logger().info(f'Currently tracking {len(self.dynamic_objects)} dynamic objects')
     
     def classify_cluster(self, cluster):
-        """Classify LiDAR cluster based on properties"""
-        # Extract cluster features
-        height = cluster['max_z'] - cluster['min_z']
-        width = max(cluster['dimensions'][0], cluster['dimensions'][1])
-        length = cluster['dimensions'][0]  # Assuming x is the forward direction
-        height_ratio = height / width if width > 0 else 0
+        """Classify a cluster based on its properties"""
+        # Extract dimensions
+        width = cluster['dimensions'][0]
+        length = cluster['dimensions'][1]
+        height = cluster['max_z'] - cluster['min_z'] if 'max_z' in cluster and 'min_z' in cluster else 0
         
-        # Check for velocity first - moving objects are likely vehicles
-        if cluster['velocity'] > self.dynamic_velocity_threshold:
-            self.get_logger().info(f'Dynamic object detected based on velocity: {cluster["velocity"]:.2f} m/s')
+        # Get velocity if available - but don't use it as a threshold
+        velocity = cluster.get('velocity', 0.0)
+        
+        # Calculate distance from sensor (approximation)
+        distance = math.sqrt(cluster['centroid'][0]**2 + cluster['centroid'][1]**2)
+        
+        # Scale detection thresholds based on distance
+        # Objects appear smaller when further away, so we reduce the minimum width threshold
+        distance_factor = max(1.0, min(3.0, 1.0 + distance / 30.0))  # Scale factor increases with distance
+        scaled_car_detection_width = self.car_detection_width / distance_factor
+        
+        # Check if this is from radar (all radar objects are considered important)
+        if cluster.get('source') == 'radar':
+            # All radar detections are marked as cars for better visibility
+            cluster['is_car'] = True
+            # Mark as dynamic to ensure high visibility
             return 'dynamic'
+        
+        # Special handling for low-profile cars
+        if self.enhance_low_cars:
+            # Check if object has car-like dimensions (wide but low)
+            is_car_like = (width >= scaled_car_detection_width or length >= scaled_car_detection_width) and \
+                          height >= self.low_car_height_threshold and \
+                          height <= self.ground_height_threshold * 3  # Increased from 2 to 3 for better detection
             
-        # IMPROVED Car detection based on more inclusive dimensions
-        # Most cars are 1.5-2m high, 1.7-2m wide, and 4-5m long
-        # But we need to include lower-profile cars too
-        if (
-            # More inclusive height range to detect lower-profile cars
-            0.5 <= height <= 2.5 and 
-            # Standard car width range
-            1.5 <= width <= 3.0 and 
-            # Standard car length range
-            2.0 <= length <= 6.0
-        ):
-            self.get_logger().info(f'Car detected: h={height:.2f}m, w={width:.2f}m, l={length:.2f}m')
-            return 'dynamic'  # Classify as dynamic even if stationary for vehicles
+            # Additional check for very low but wide objects that might be cars
+            is_very_low_car = (width >= scaled_car_detection_width * 1.5 or length >= scaled_car_detection_width * 1.5) and \
+                             height >= self.low_car_height_threshold * 0.5  # Even lower threshold for wide objects
             
-        # Special case for very low-profile sports cars
-        if (
-            # Ultra-low profile
-            0.3 <= height <= 1.5 and
-            # Standard car width
-            1.5 <= width <= 2.5 and
-            # Standard car length
-            3.0 <= length <= 5.0
-        ):
-            self.get_logger().info(f'Low-profile sports car detected: h={height:.2f}m, w={width:.2f}m, l={length:.2f}m')
+            # Special handling for distant objects - be more lenient with dimensions
+            if distance > 20.0:  # For objects more than 20m away
+                is_distant_car = (width >= scaled_car_detection_width * 0.7 or length >= scaled_car_detection_width * 0.7) and \
+                                height >= self.low_car_height_threshold * 0.3
+                if is_distant_car:
+                    self.get_logger().info(f"Detected distant car: w={width:.2f}m, l={length:.2f}m, h={height:.2f}m, dist={distance:.2f}m")
+                    cluster['is_car'] = True
+                    return 'obstacle'
+            
+            if is_car_like or is_very_low_car:
+                self.get_logger().info(f"Detected low-profile car: w={width:.2f}m, l={length:.2f}m, h={height:.2f}m, dist={distance:.2f}m")
+                # Mark as car for special handling
+                cluster['is_car'] = True
+                # Return as obstacle instead of ground
+                return 'obstacle'
+        
+        # Check for dynamic objects - REMOVE VELOCITY THRESHOLD
+        # Consider ANY object with ANY velocity as potentially dynamic
+        if velocity > 0.0 or 'is_moving' in cluster and cluster['is_moving']:
+            # Any moving object is dynamic
             return 'dynamic'
-            
-        # Original classification logic
+        
+        # If object has significant size in any dimension, treat as dynamic
+        # Scale the size threshold based on distance but keep it very low
+        min_size_threshold = 0.1 / distance_factor  # Reduced from 0.3 to 0.1
+        if max(width, length, height) >= min_size_threshold:
+            # Any significant object is treated as dynamic for better visibility
+            return 'dynamic'
+        
+        # Very inclusive ground classification
         if height < self.ground_height_threshold:
+            # Check if this might be a low car based on width/length ratio
+            if width > scaled_car_detection_width * 0.8 or length > scaled_car_detection_width * 0.8:
+                self.get_logger().info(f"Potential low car detected: w={width:.2f}m, l={length:.2f}m, h={height:.2f}m, dist={distance:.2f}m")
+                # Mark as obstacle instead of ground
+                return 'obstacle'
+            # Any low object is ground
             return 'ground'
-        elif height_ratio > self.vegetation_height_ratio:
+        elif height > width * 1.5:
+            # Tall and narrow objects are likely vegetation
             return 'vegetation'
         elif width > self.building_width_threshold and height > 2.0:
+            # Very wide and tall objects are buildings
             return 'building'
         else:
+            # Everything else is an obstacle
             return 'obstacle'
     
     def update_layer_from_cluster(self, cluster, cluster_class):
@@ -1009,44 +1169,123 @@ class SemanticCostmapVisualizer(Node):
         if min_x is None or min_y is None or max_x is None or max_y is None:
             return
         
+        # Calculate distance from sensor (approximation)
+        distance = math.sqrt(cluster['centroid'][0]**2 + cluster['centroid'][1]**2)
+        
         # Set cost in appropriate layer
-        # Increase cost for radar-detected objects and dynamic objects
+        # Increase cost for all detected objects to ensure visibility
         base_cost = int(min(100, cluster['confidence'] * 100))
         
         # Special handling for cars and radar objects
         is_car = cluster.get('is_car', False)
         is_radar = cluster.get('source') == 'radar'
         
-        # Set cost based on object type
-        if is_car:
-            # Cars get absolute maximum priority
-            cost = 100  # Maximum possible cost
-            self.get_logger().info(f'Setting maximum cost (100) for car object at ({cluster["centroid"][0]:.2f}, {cluster["centroid"][1]:.2f})')
-        elif is_radar:
-            # Radar objects get a significant boost
-            cost = min(100, base_cost + 60)  # Increased from +50 to +60 for better visibility
-            if cluster_class == 'dynamic':
-                # Dynamic radar objects get very high priority
-                cost = min(100, base_cost + 80)  # Increased from +70 to +80
-                # Log the radar dynamic object for debugging
-                self.get_logger().info(f'Radar dynamic object detected: position=({cluster["centroid"][0]:.2f}, {cluster["centroid"][1]:.2f}), velocity={cluster.get("velocity", 0):.2f}')
-        else:
-            cost = base_cost
+        # Special handling for low-profile cars
+        is_low_car = False
+        if self.enhance_low_cars and 'dimensions' in cluster:
+            width = cluster['dimensions'][0]
+            length = cluster['dimensions'][1]
+            height = cluster['max_z'] - cluster['min_z'] if 'max_z' in cluster and 'min_z' in cluster else 0
             
+            # Check if object has car-like dimensions (wide but low)
+            is_low_car = (width >= self.car_detection_width or length >= self.car_detection_width) and \
+                         height >= self.low_car_height_threshold and \
+                         height <= self.ground_height_threshold * 3
+            
+            # Additional check for very low but wide objects
+            is_very_low_car = (width >= self.car_detection_width * 1.5 or length >= self.car_detection_width * 1.5) and \
+                             height >= self.low_car_height_threshold * 0.5
+            
+            if (is_low_car or is_very_low_car) and not is_car:
+                is_car = True
+                cluster['is_car'] = True
+                self.get_logger().info(f"Enhanced low-profile car detection: w={width:.2f}m, l={length:.2f}m, h={height:.2f}m, dist={distance:.2f}m")
+        
+        # Set cost based on object type - ENSURE ALL OBJECTS HAVE HIGH VISIBILITY
+        # All objects get high cost to ensure visibility
+        cost = 100  # Maximum possible cost for all objects
+        
+        if is_car or is_radar:
+            self.get_logger().info(f'Setting maximum cost (100) for car/radar at ({cluster["centroid"][0]:.2f}, {cluster["centroid"][1]:.2f}), dist={distance:.2f}m')
+        else:
+            self.get_logger().info(f'Setting high cost (100) for object at ({cluster["centroid"][0]:.2f}, {cluster["centroid"][1]:.2f}), dist={distance:.2f}m')
+        
         current_time = time.time()
         
-        # Create a larger area of influence for dynamic objects and cars
-        radius_boost = 1
-        if is_car:
-            # Significantly larger area for cars to ensure visibility
-            radius_boost = 7  # Increased from 5 to 7 for better visibility of small cars
-            # Add special logging for car detection
-            height = cluster['max_z'] - cluster['min_z'] if 'max_z' in cluster and 'min_z' in cluster else 0
-            self.get_logger().info(f'Car detected with height {height:.2f}m - using large radius_boost={radius_boost}')
-        elif cluster_class == 'dynamic':
-            radius_boost = 5  # Increased from 4 to 5 for better visibility
+        # Use configurable expansion radius based on object type
+        # ENSURE MINIMUM EXPANSION FOR ALL OBJECTS
+        if is_car or is_radar:
+            # Use car expansion radius parameter - ensure it's at least 2
+            radius_boost = max(2, int(self.car_expansion_radius))
             
-        # Expand the object's footprint
+            # For distant cars, ensure a minimum expansion radius
+            if distance > 30.0:  # For objects more than 30m away
+                radius_boost = max(radius_boost, 4)  # Ensure at least 4 cells expansion for distant cars
+                self.get_logger().info(f'Distant car/radar object detected at {distance:.2f}m - using enhanced radius_boost={radius_boost}')
+            elif distance > 20.0:  # For objects more than 20m away
+                radius_boost = max(radius_boost, 3)  # Ensure at least 3 cells expansion for medium-distance cars
+                
+            # Check if the object is likely seen from the side (width > length)
+            is_side_view = cluster.get('is_side_view', False)
+            if is_side_view:
+                # Add a boost for side-view objects
+                radius_boost += 2  # Increased from 1 to 2
+                self.get_logger().info(f'Object detected from SIDE VIEW - using radius_boost={radius_boost}')
+            
+            # Add special logging
+            height = cluster['max_z'] - cluster['min_z'] if 'max_z' in cluster and 'min_z' in cluster else 0
+            width = max(cluster['dimensions'][0], cluster['dimensions'][1]) if 'dimensions' in cluster else 0
+            self.get_logger().info(f'Car/radar object detected with h={height:.2f}m, w={width:.2f}m - using radius_boost={radius_boost}')
+        elif cluster_class == 'dynamic':
+            # Use dynamic expansion radius parameter - ensure it's at least 2
+            radius_boost = max(2, int(self.dynamic_expansion_radius))
+            
+            # For distant dynamic objects, increase visibility
+            if distance > 20.0:
+                radius_boost = max(radius_boost, 3)  # Ensure at least 3 cells expansion for distant dynamic objects
+        else:
+            # Use obstacle expansion radius parameter for all other objects - ensure it's at least 1
+            radius_boost = max(1, int(self.obstacle_expansion_radius))
+            
+            # For distant obstacles, ensure minimum visibility
+            if distance > 25.0:
+                radius_boost = max(radius_boost, 2)  # Ensure at least 2 cells expansion for distant obstacles
+        
+        # Special handling for low cars - make them visible with sufficient expansion
+        if is_low_car or is_car:
+            # Use car expansion radius - ensure it's at least 2
+            car_radius = max(2, int(self.car_expansion_radius))
+            
+            # For distant cars, ensure a minimum expansion radius
+            if distance > 30.0:
+                car_radius = max(car_radius, 4)  # Ensure at least 4 cells expansion for distant cars
+            elif distance > 20.0:
+                car_radius = max(car_radius, 3)  # Ensure at least 3 cells expansion for medium-distance cars
+                
+            self.get_logger().info(f'Car detected at distance {distance:.2f}m - using car expansion radius={car_radius}')
+            
+            # Explicitly update the obstacle layer for low cars - only the actual car and minimal surroundings
+            for y in range(min_y - car_radius, max_y + car_radius + 1):
+                for x in range(min_x - car_radius, max_x + car_radius + 1):
+                    if 0 <= x < self.map_width and 0 <= y < self.map_height:
+                        # Calculate distance from cluster bounds
+                        if min_x <= x <= max_x and min_y <= y <= max_y:
+                            # Inside the car's actual bounds - maximum cost
+                            self.layers['obstacle'][y, x] = 100
+                        else:
+                            # Outside bounds - calculate distance-based cost with less steep falloff
+                            dx = max(0, min_x - x, x - max_x)
+                            dy = max(0, min_y - y, y - max_y)
+                            distance_to_edge = math.sqrt(dx*dx + dy*dy)
+                            
+                            # Use a higher minimum cost for better visibility
+                            min_cost_factor = 0.6  # Increased from 0.5 to 0.6
+                            # Use linear distance for less steep falloff
+                            falloff = min(1.0, distance_to_edge/car_radius)
+                            cell_cost = int(100 * max(min_cost_factor, 1.0 - falloff))
+                            self.layers['obstacle'][y, x] = max(self.layers['obstacle'][y, x], cell_cost)
+        
+        # Expand the object's footprint with sufficient expansion
         for y in range(min_y - radius_boost, max_y + radius_boost + 1):
             for x in range(min_x - radius_boost, max_x + radius_boost + 1):
                 if 0 <= x < self.map_width and 0 <= y < self.map_height:
@@ -1057,17 +1296,41 @@ class SemanticCostmapVisualizer(Node):
                         # Calculate distance from cluster bounds
                         dx = max(0, min_x - x, x - max_x)
                         dy = max(0, min_y - y, y - max_y)
-                        distance = math.sqrt(dx*dx + dy*dy)
-                        # Reduce cost based on distance, but keep a higher minimum for radar dynamic objects
-                        min_cost_factor = 0.3  # Default minimum cost factor
-                        if is_car:
-                            min_cost_factor = 0.8  # Increased from 0.7 to 0.8 for better visibility of small cars
-                        elif is_radar and cluster_class == 'dynamic':
-                            min_cost_factor = 0.7  # Increased from 0.6 to 0.7 for better visibility
-                        cell_cost = int(cost * max(min_cost_factor, 1.0 - distance/radius_boost))
+                        distance_to_edge = math.sqrt(dx*dx + dy*dy)
+                        
+                        # Use less steep falloff for all objects
+                        # Reduce cost based on distance, but keep a higher minimum
+                        min_cost_factor = 0.5  # Increased from 0.3 to 0.5
+                        if is_car or is_radar:
+                            # Higher minimum cost factor
+                            if is_side_view:
+                                min_cost_factor = 0.7  # Increased from 0.5 to 0.7
+                            else:
+                                min_cost_factor = 0.6  # Increased from 0.4 to 0.6
+                        elif cluster_class == 'dynamic':
+                            min_cost_factor = 0.6  # Increased from 0.4 to 0.6
+                        
+                        # Use linear distance for less steep falloff
+                        falloff = min(1.0, distance_to_edge/radius_boost)
+                        cell_cost = int(cost * max(min_cost_factor, 1.0 - falloff))
                     
                     # Update layer with maximum cost
                     self.layers[cluster_class][y, x] = max(self.layers[cluster_class][y, x], cell_cost)
+                    
+                    # CRITICAL: Mark EVERY object in ALL layers with high cost
+                    # This ensures it will be included in the binary map regardless of classification
+                    
+                    # Mark in ground layer with significant cost
+                    ground_cost = max(60, int(cell_cost * 0.7))  # Increased from 50 to 60 and from 0.6 to 0.7
+                    self.layers['ground'][y, x] = max(self.layers['ground'][y, x], ground_cost)
+                    
+                    # Mark in obstacle layer
+                    obstacle_cost = max(70, int(cell_cost * 0.8))  # Increased from 50 to 70 and from 0.6 to 0.8
+                    self.layers['obstacle'][y, x] = max(self.layers['obstacle'][y, x], obstacle_cost)
+                    
+                    # Mark in dynamic layer
+                    dynamic_cost = max(80, int(cell_cost * 0.9))  # Increased from 50 to 80 and from 0.6 to 0.9
+                    self.layers['dynamic'][y, x] = max(self.layers['dynamic'][y, x], dynamic_cost)
                     
                     # Update confidence and timestamp
                     self.confidence_map[y, x] = max(self.confidence_map[y, x], cluster['confidence'])
@@ -1372,30 +1635,85 @@ class SemanticCostmapVisualizer(Node):
         # Create binary map from combined costmap
         binary_map = np.zeros_like(self.layers['combined'])
         
-        # CRITICAL: First, ensure ANY non-zero value in the dynamic layer is included
-        # This is the most important step to ensure moving objects appear
-        dynamic_layer = self.layers['dynamic']
-        binary_map[dynamic_layer > 0] = self.occupied_value
-        dynamic_cells = np.sum(dynamic_layer > 0)
-        self.get_logger().info(f'Save map: Dynamic layer cells with ANY value: {dynamic_cells}')
+        # CRITICAL: Include ANY non-zero value from ANY layer
+        # This ensures ALL detected objects appear in the binary map regardless of classification
+        total_cells = 0
         
-        # Then apply standard thresholds for other layers
-        if self.convert_all_non_ground_to_occupied:
-            # Mark all non-ground objects as obstacles
-            for layer_name in ['obstacle', 'vegetation', 'building']:
-                # Regular threshold for other layers
-                binary_map[self.layers[layer_name] > self.binary_threshold * 100] = self.occupied_value
-        else:
-            # Only mark specific layers as obstacles
-            # Always mark obstacles
-            binary_map[self.layers['obstacle'] > self.binary_threshold * 100] = self.occupied_value
+        # Use an extremely low threshold to ensure all objects are included
+        distant_threshold = 1  # Any value above 0 will be included
+        normal_threshold = 10  # Very low threshold for normal detection
+        
+        self.get_logger().info(f'Using ultra-inclusive binary map thresholds: normal={normal_threshold}, distant={distant_threshold}')
+        
+        # First include obstacle layer cells (which include low-profile cars) - highest priority
+        obstacle_layer = self.layers['obstacle']
+        binary_map[obstacle_layer >= normal_threshold] = self.occupied_value
+        obstacle_cells = np.sum(obstacle_layer >= normal_threshold)
+        
+        # Also include distant obstacles with lower threshold
+        distant_mask = (obstacle_layer >= distant_threshold) & (obstacle_layer < normal_threshold) & (binary_map != self.occupied_value)
+        binary_map[distant_mask] = self.occupied_value
+        distant_obstacle_cells = np.sum(distant_mask)
+        
+        total_cells += obstacle_cells + distant_obstacle_cells
+        self.get_logger().info(f'Binary map: Obstacle layer cells: {obstacle_cells} normal + {distant_obstacle_cells} distant')
+        
+        # Next include dynamic objects (high priority)
+        dynamic_layer = self.layers['dynamic']
+        mask = (dynamic_layer >= normal_threshold) & (binary_map != self.occupied_value)
+        binary_map[mask] = self.occupied_value
+        dynamic_cells = np.sum(mask)
+        
+        # Include distant dynamic objects with lower threshold
+        distant_mask = (dynamic_layer >= distant_threshold) & (dynamic_layer < normal_threshold) & (binary_map != self.occupied_value)
+        binary_map[distant_mask] = self.occupied_value
+        distant_dynamic_cells = np.sum(distant_mask)
+        
+        total_cells += dynamic_cells + distant_dynamic_cells
+        self.get_logger().info(f'Binary map: Dynamic layer cells: {dynamic_cells} normal + {distant_dynamic_cells} distant')
+        
+        # Include ALL vegetation layer cells
+        vegetation_layer = self.layers['vegetation']
+        mask = (vegetation_layer >= normal_threshold) & (binary_map != self.occupied_value)
+        binary_map[mask] = self.occupied_value
+        vegetation_cells = np.sum(mask)
+        
+        # Include distant vegetation with lower threshold
+        distant_mask = (vegetation_layer >= distant_threshold) & (vegetation_layer < normal_threshold) & (binary_map != self.occupied_value)
+        binary_map[distant_mask] = self.occupied_value
+        distant_vegetation_cells = np.sum(distant_mask)
+        
+        total_cells += vegetation_cells + distant_vegetation_cells
+        self.get_logger().info(f'Binary map: Vegetation layer cells: {vegetation_cells} normal + {distant_vegetation_cells} distant')
+        
+        # Include ALL building layer cells
+        building_layer = self.layers['building']
+        mask = (building_layer >= normal_threshold) & (binary_map != self.occupied_value)
+        binary_map[mask] = self.occupied_value
+        building_cells = np.sum(mask)
+        
+        # Include distant buildings with lower threshold
+        distant_mask = (building_layer >= distant_threshold) & (building_layer < normal_threshold) & (binary_map != self.occupied_value)
+        binary_map[distant_mask] = self.occupied_value
+        distant_building_cells = np.sum(distant_mask)
+        
+        total_cells += building_cells + distant_building_cells
+        self.get_logger().info(f'Binary map: Building layer cells: {building_cells} normal + {distant_building_cells} distant')
+        
+        # Only include ground if configured to do so
+        if self.include_ground_in_binary and self.ground_as_occupied:
+            ground_layer = self.layers['ground']
+            mask = (ground_layer >= normal_threshold) & (binary_map != self.occupied_value)
+            binary_map[mask] = self.occupied_value
+            ground_cells = np.sum(mask)
             
-            # Conditionally mark vegetation if specified
-            if self.convert_vegetation_to_occupied:
-                binary_map[self.layers['vegetation'] > self.binary_threshold * 100] = self.occupied_value
+            # Include distant ground with lower threshold
+            distant_mask = (ground_layer >= distant_threshold) & (ground_layer < normal_threshold) & (binary_map != self.occupied_value)
+            binary_map[distant_mask] = self.occupied_value
+            distant_ground_cells = np.sum(distant_mask)
             
-            # Always mark buildings as obstacles
-            binary_map[self.layers['building'] > self.binary_threshold * 100] = self.occupied_value
+            total_cells += ground_cells + distant_ground_cells
+            self.get_logger().info(f'Binary map: Ground layer cells: {ground_cells} normal + {distant_ground_cells} distant')
         
         # Create OccupancyGrid message
         grid_msg = OccupancyGrid()
@@ -1416,7 +1734,7 @@ class SemanticCostmapVisualizer(Node):
         
         # Log the number of occupied cells for debugging
         occupied_cells = np.sum(binary_map == self.occupied_value)
-        self.get_logger().info(f'Binary map published with {occupied_cells} occupied cells')
+        self.get_logger().info(f'Binary map published with {occupied_cells} total occupied cells from {total_cells} detected cells')
     
     def toggle_layer_callback(self, request, response):
         """Service callback to toggle layer visibility"""
@@ -1469,34 +1787,44 @@ class SemanticCostmapVisualizer(Node):
                     # Create binary map
                     binary_map = np.zeros_like(self.layers['combined'])
                     
-                    # CRITICAL: First, ensure ANY non-zero value in the dynamic layer is included
-                    # This is the most important step to ensure moving objects appear
-                    dynamic_layer = self.layers['dynamic']
-                    binary_map[dynamic_layer > 0] = self.occupied_value
-                    dynamic_cells = np.sum(dynamic_layer > 0)
-                    self.get_logger().info(f'Save map: Dynamic layer cells with ANY value: {dynamic_cells}')
+                    # CRITICAL: Include ANY non-zero value from ANY layer
+                    # This ensures ALL detected objects appear in the binary map regardless of classification
+                    total_cells = 0
                     
-                    # Then apply standard thresholds for other layers
-                    if self.convert_all_non_ground_to_occupied:
-                        # Mark all non-ground objects as obstacles
-                        for layer_name in ['obstacle', 'vegetation', 'building']:
-                            # Regular threshold for other layers
-                            binary_map[self.layers[layer_name] > self.binary_threshold * 100] = self.occupied_value
-                    else:
-                        # Only mark specific layers as obstacles
-                        # Always mark obstacles
-                        binary_map[self.layers['obstacle'] > self.binary_threshold * 100] = self.occupied_value
-                        
-                        # Conditionally mark vegetation if specified
-                        if self.convert_vegetation_to_occupied:
-                            binary_map[self.layers['vegetation'] > self.binary_threshold * 100] = self.occupied_value
-                        
-                        # Always mark buildings as obstacles
-                        binary_map[self.layers['building'] > self.binary_threshold * 100] = self.occupied_value
+                    # First include obstacle layer cells (which include low-profile cars) - highest priority
+                    obstacle_layer = self.layers['obstacle']
+                    binary_map[obstacle_layer > 0] = self.occupied_value
+                    obstacle_cells = np.sum(obstacle_layer > 0)
+                    total_cells += obstacle_cells
+                    self.get_logger().info(f'Save map: Obstacle layer cells: {obstacle_cells}')
+                    
+                    # Next include dynamic objects (high priority)
+                    dynamic_layer = self.layers['dynamic']
+                    mask = (dynamic_layer > 0) & (binary_map != self.occupied_value)
+                    binary_map[mask] = self.occupied_value
+                    dynamic_cells = np.sum(mask)
+                    total_cells += dynamic_cells
+                    self.get_logger().info(f'Save map: Dynamic layer cells: {dynamic_cells}')
+                    
+                    # Include ALL vegetation layer cells
+                    vegetation_layer = self.layers['vegetation']
+                    mask = (vegetation_layer > 0) & (binary_map != self.occupied_value)
+                    binary_map[mask] = self.occupied_value
+                    vegetation_cells = np.sum(mask)
+                    total_cells += vegetation_cells
+                    self.get_logger().info(f'Save map: Vegetation layer cells: {vegetation_cells}')
+                    
+                    # Include ALL building layer cells
+                    building_layer = self.layers['building']
+                    mask = (building_layer > 0) & (binary_map != self.occupied_value)
+                    binary_map[mask] = self.occupied_value
+                    building_cells = np.sum(mask)
+                    total_cells += building_cells
+                    self.get_logger().info(f'Save map: Building layer cells: {building_cells}')
                     
                     # Save binary map
                     self.save_pgm(binary_map, f"{base_path}_binary.pgm", self.occupied_value)
-                    self.get_logger().info(f"Binary map saved to {base_path}_binary.pgm")
+                    self.get_logger().info(f"Binary map saved to {base_path}_binary.pgm with {np.sum(binary_map == self.occupied_value)} total occupied cells")
                 
                 # Save combined map if enabled
                 if self.save_combined_map:
