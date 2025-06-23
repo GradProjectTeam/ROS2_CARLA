@@ -36,6 +36,32 @@ Added Waypoint Integration:
 - Waypoints from CARLA are received via TCP connection
 - Waypoints are visualized and added to the binary map
 - The combined binary map includes both semantic data and waypoints
+
+UNIFIED MAP CONFIGURATION:
+- This launch file has been modified to save only ONE combined map instead of multiple separate maps
+- The binary_map_combiner node is now the only node saving maps to disk
+- The unified map combines LiDAR data, radar data, and waypoints into a single comprehensive map
+- Individual map saving is disabled in the semantic_costmap_visualizer and waypoint_map_generator nodes
+
+UNIFIED MAP FEATURES:
+- High-quality integration of data from all available sensors (LiDAR, radar)
+- Complete inclusion of all detected objects, regardless of classification
+- Seamless integration of waypoints for path planning and navigation
+- Preservation of thin obstacles that might be filtered otherwise
+- Expanded obstacles for safe navigation
+- Map saves automatically at intervals specified by save_interval (default: 5.0 seconds)
+- Map also saves on system shutdown to prevent data loss
+- PGM format (image) with YAML metadata file for navigation stack compatibility
+- Unified map available on ROS topic: /unified_map
+- Enhanced parameters for fine-tuning the unified map's appearance and behavior
+
+USING THE UNIFIED MAP:
+- The unified map is the only map saved to disk, in the directory: /home/mostafa/GP/ROS2/maps/NewMaps
+- Each map is saved with a timestamp for uniqueness: unified_map_YYYYMMDD_HHMMSS.pgm
+- Maps can be loaded directly into ROS2 navigation2 stack using map_server
+- Control map saving with the enable_map_saving parameter (default: true)
+- Control map quality with unified_map_quality parameter (options: low, medium, high)
+- The directory is automatically created if it doesn't exist
 """
 
 import os
@@ -45,6 +71,7 @@ from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
 from launch.substitutions import LaunchConfiguration, TextSubstitution
 from launch_ros.actions import Node
 from launch.conditions import IfCondition
+import time  # Import time module for timestamp generation
 
 def generate_launch_description():
     # Get the package share directory
@@ -52,6 +79,10 @@ def generate_launch_description():
     
     # Define the path to the RViz configuration file
     rviz_config_file = os.path.join(pkg_share, 'rviz', 'semantic_waypoints.rviz')
+    
+    # Define default save directory and ensure it exists
+    default_save_dir = '/home/mostafa/GP/ROS2/maps/NewMaps'
+    os.makedirs(default_save_dir, exist_ok=True)
     
     # ==================== DECLARE LAUNCH ARGUMENTS ====================
     # Common arguments
@@ -331,8 +362,8 @@ def generate_launch_description():
     # Add parameters for map saving
     declare_enable_map_saving = DeclareLaunchArgument(
         'enable_map_saving',
-        default_value='true',  # Disabled by default
-        description='Enable saving maps to local files'
+        default_value='true',  # Enable by default
+        description='Enable saving unified map to local file'  # Updated description
     )
     
     declare_save_directory = DeclareLaunchArgument(
@@ -550,6 +581,49 @@ def generate_launch_description():
         'imu_frame_id',
         default_value='imu_link',
         description='Frame ID for the IMU'
+    )
+    
+    # Add new launch arguments for unified map configuration
+    declare_unified_map_topic = DeclareLaunchArgument(
+        'unified_map_topic',
+        default_value='/unified_map',
+        description='Topic name for publishing the unified map'
+    )
+    
+    declare_unified_map_quality = DeclareLaunchArgument(
+        'unified_map_quality',
+        default_value='high',
+        description='Quality of the unified map (options: low, medium, high)'
+    )
+    
+    declare_unified_map_format = DeclareLaunchArgument(
+        'unified_map_format',
+        default_value='pgm',
+        description='Format for saving the unified map'
+    )
+    
+    declare_enhanced_radar_integration = DeclareLaunchArgument(
+        'enhanced_radar_integration',
+        default_value='true',
+        description='Enable enhanced integration of radar data'
+    )
+    
+    declare_enhanced_lidar_integration = DeclareLaunchArgument(
+        'enhanced_lidar_integration',
+        default_value='true',
+        description='Enable enhanced integration of LiDAR data'
+    )
+    
+    declare_add_timestamp_to_filename = DeclareLaunchArgument(
+        'add_timestamp_to_filename',
+        default_value='true',
+        description='Add timestamp to map filenames for uniqueness'
+    )
+    
+    declare_force_save_on_shutdown = DeclareLaunchArgument(
+        'force_save_on_shutdown',
+        default_value='true',
+        description='Save map on shutdown'
     )
     
     # ==================== TF TREE CONFIGURATION ====================
@@ -870,8 +944,8 @@ def generate_launch_description():
             # Binary output for navigation - simplified parameters
             'enable_binary_output': True,
             'binary_topic': LaunchConfiguration('binary_topic'),
-            'occupied_value': 100,
-            'free_value': 0,
+            'occupied_value': 100,  # Force black for occupied cells
+            'free_value': 0,        # Force white for free cells
             'binary_threshold': LaunchConfiguration('binary_threshold'),
             'convert_vegetation_to_occupied': True,  # Explicitly convert vegetation to occupied
             'convert_all_non_ground_to_occupied': True,  # Changed from False to True - mark all non-ground as occupied
@@ -890,12 +964,18 @@ def generate_launch_description():
             'all_objects_threshold': 0.01,  # Very low threshold to include even faint detections
             
             # Map saving parameters
-            'enable_map_saving': LaunchConfiguration('enable_map_saving'),
+            'enable_map_saving': False,  # Changed from LaunchConfiguration('enable_map_saving') to False
             'save_directory': LaunchConfiguration('save_directory'),
             'save_interval': LaunchConfiguration('save_interval'),
-            'save_binary_map': LaunchConfiguration('save_binary_map'),
-            'save_combined_map': LaunchConfiguration('save_combined_map'),
-            'save_layer_maps': LaunchConfiguration('save_layer_maps'),
+            'save_binary_map': False,  # Changed from LaunchConfiguration('save_binary_map') to False
+            'save_combined_map': False,  # Changed from LaunchConfiguration('save_combined_map') to False
+            'save_layer_maps': False,  # Already False
+            'save_as_black_white': True,  # Save as black and white
+            'save_as_pgm': True,  # Save as PGM format
+            'save_as_yaml': True,  # Save YAML metadata
+            'enforce_binary_values': True,  # Ensure only binary values (0 or 100) are used
+            'binary_map_name_prefix': 'semantic_binary_bw_',  # Distinctive name prefix with black/white indicator
+            'combined_map_name_prefix': 'semantic_combined_bw_',  # Distinctive name prefix with black/white indicator
             
             # Add new parameters for low car detection
             'enhance_low_cars': LaunchConfiguration('enhance_low_cars'),
@@ -906,6 +986,10 @@ def generate_launch_description():
             'car_expansion_radius': LaunchConfiguration('car_expansion_radius'),
             'obstacle_expansion_radius': LaunchConfiguration('obstacle_expansion_radius'),
             'dynamic_expansion_radius': LaunchConfiguration('dynamic_expansion_radius'),
+            
+            # Additional parameters for binary output
+            'map_color_scheme': 'binary',  # Use binary color scheme (white=free, black=occupied)
+            'convert_to_black_white': True,  # Convert map to black and white
         }],
         output='screen'
     )
@@ -977,13 +1061,14 @@ def generate_launch_description():
             'map_resolution': LaunchConfiguration('map_resolution'),
             'map_width_meters': LaunchConfiguration('map_width_meters'),
             'map_height_meters': LaunchConfiguration('map_height_meters'),
-            'map_frame_id': 'waypoint_frame',  # Use waypoint_frame for consistency
-            'publish_rate': 10.0,  # Increased publish rate for more frequent updates
+            'map_frame_id': LaunchConfiguration('map_frame_id'),  # Use map frame for consistency
+            'publish_rate': 20.0,  # Increased publish rate for more frequent updates
             'waypoint_marker_topic': '/carla/waypoint_markers',
             'binary_topic': LaunchConfiguration('waypoint_binary_topic'),
-            'occupied_value': LaunchConfiguration('occupied_value'),
-            'free_value': LaunchConfiguration('free_value'),
-            'waypoint_width': 2.0,  # Increased width for better visibility
+            'binary_updates_topic': '/waypoint_map/binary_updates',  # Use explicit string instead of concatenation
+            'occupied_value': 100,  # Force black for occupied cells
+            'free_value': 0,        # Force white for free cells
+            'waypoint_width': 7.0,  # Significantly increased width for better visibility
             'use_vehicle_frame': False,  # Don't center on vehicle
             'map_origin_x': LaunchConfiguration('map_origin_x'),
             'map_origin_y': LaunchConfiguration('map_origin_y'),
@@ -991,6 +1076,27 @@ def generate_launch_description():
             'publish_empty_map': True,  # Publish an empty map even if no waypoints are available
             'use_transient_local_durability': True,  # Use transient local durability for better reliability
             'always_republish': True,  # Always republish the map even if there are no changes
+            'save_waypoint_map': False,  # Changed from True to False - disable individual waypoint map saving
+            'save_as_black_white': True,  # Save as black and white
+            'use_persistent_topics': True,  # Use persistent topics for better reliability
+            'draw_thick_lines': True,  # Draw thicker lines for better visibility
+            'connect_waypoints': True,  # Connect waypoints with lines
+            'fill_enclosed_areas': False,  # Don't fill enclosed areas
+            'clear_between_updates': False,  # Don't clear between updates to maintain waypoints
+            'save_directory': LaunchConfiguration('save_directory'),  # Use launch argument for save directory
+            'save_interval': LaunchConfiguration('save_interval'),  # Use launch argument for save interval
+            'map_name_prefix': 'waypoints_only_bw_',  # Distinctive name prefix with black/white indicator
+            'line_thickness': 3,  # Thicker lines for better visibility
+            'waypoint_persistence': 10.0,  # Keep waypoints visible longer
+            'force_publish': True,  # Force publish even if no waypoints are available
+            'debug_mode': True,  # Enable debug mode for more detailed logging
+            'initial_map_publish': True,  # Publish an initial empty map on startup
+            'publish_frequency': 1.0,  # Publish at least once per second
+            'map_color_scheme': 'binary',  # Use binary color scheme (white=free, black=occupied)
+            'save_as_pgm': True,  # Save as PGM format
+            'save_as_yaml': True,  # Save YAML metadata
+            'enforce_binary_values': True,  # Ensure only binary values (0 or 100) are used
+            'binary_threshold': 50,  # Threshold for binary conversion
         }],
         output='screen'
     )
@@ -1002,16 +1108,79 @@ def generate_launch_description():
         name='binary_map_combiner',
         parameters=[{
             'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'map_frame_id': LaunchConfiguration('map_frame_id'),
-            'publish_rate': LaunchConfiguration('publish_rate'),
-            'semantic_binary_topic': LaunchConfiguration('binary_topic'),
-            'waypoint_binary_topic': LaunchConfiguration('waypoint_binary_topic'),
-            'combined_binary_topic': LaunchConfiguration('combined_binary_topic'),
-            'occupied_value': LaunchConfiguration('occupied_value'),
-            'free_value': LaunchConfiguration('free_value'),
+            'map_frame_id': LaunchConfiguration('map_frame_id'),  # Use map frame explicitly
+            'publish_rate': 20.0,  # Increased from default for more frequent updates
+            'semantic_binary_topic': LaunchConfiguration('binary_topic'),  # Explicitly set topic name
+            'waypoint_binary_topic': LaunchConfiguration('waypoint_binary_topic'),  # Explicitly set topic name
+            'combined_binary_topic': LaunchConfiguration('combined_binary_topic'),  # Explicitly set topic name
+            'combined_binary_updates_topic': '/combined_binary_map_updates',  # Use explicit string instead of concatenation
+            'occupied_value': 100,  # Force black for occupied cells
+            'free_value': 0,        # Force white for free cells
             'prioritize_waypoints': True,  # Waypoints take priority over semantic data
-            'use_transient_local_durability': True,
+            'use_transient_local_durability': True,  # Ensure consistent QoS settings
             'verbose_logging': True,  # Add verbose logging for debugging
+            'save_combined_map': LaunchConfiguration('enable_map_saving'),  # Use the global enable_map_saving parameter
+            'save_as_black_white': True,  # Save as black and white
+            'ensure_waypoints_visible': True,  # Make sure waypoints are visible on the map
+            'waypoint_overlay_value': 100,  # Use maximum value (black) for waypoints to ensure visibility
+            'republish_on_waypoint_update': True,  # Republish when waypoints are updated
+            'waypoint_thickness': 5,  # Increase waypoint thickness for better visibility
+            'force_waypoint_overlay': True,  # Force waypoints to be overlaid on the map
+            'invert_map_colors': False,  # Don't invert colors (white=free, black=occupied)
+            'save_directory': LaunchConfiguration('save_directory'),  # Use launch argument for save directory
+            'save_interval': LaunchConfiguration('save_interval'),  # Use launch argument for save interval
+            'map_name_prefix': 'unified_map_',  # Changed from 'combined_with_waypoints_bw_' to 'unified_map_'
+            'waypoint_persistence': 10.0,  # Keep waypoints visible longer
+            'always_include_waypoints': True,  # Always include waypoints in the combined map
+            'clear_between_updates': False,  # Don't clear between updates to maintain waypoints
+            'force_publish': True,  # Force publish even if no input maps are available
+            'debug_mode': True,  # Enable debug mode for more detailed logging
+            'publish_empty_map': True,  # Publish an empty map if no input maps are available
+            'initial_map_publish': True,  # Publish an initial empty map on startup
+            'publish_frequency': 1.0,  # Publish at least once per second
+            'wait_for_transform': False,  # Don't wait for transform to avoid blocking
+            'map_color_scheme': 'binary',  # Use binary color scheme (white=free, black=occupied)
+            'monitor_topics': True,  # Monitor input topics for changes
+            'overlay_mode': 'waypoints_on_top',  # Always put waypoints on top
+            'enhance_waypoints': True,  # Make waypoints more visible
+            'waypoint_dilation': 2,  # Dilate waypoints for better visibility
+            'publish_to_semantic_combined': True,  # Also publish to semantic combined topic
+            'semantic_combined_topic': '/semantic_costmap/combined',  # Topic to publish combined data to
+            'save_as_pgm': True,  # Save as PGM format
+            'save_as_yaml': True,  # Save YAML metadata
+            'binary_threshold': 50,  # Threshold for binary conversion
+            'enforce_binary_values': True,  # Ensure only binary values (0 or 100) are used
+            'convert_to_black_white': True,  # Convert map to black and white
+            
+            # Enhanced unified map parameters
+            'include_all_data_sources': True,  # Include all available data sources 
+            'include_lidar_data': True,       # Explicitly include LiDAR data
+            'include_radar_data': True,       # Explicitly include radar data
+            'include_waypoints': True,        # Explicitly include waypoints
+            'unified_map_topic': LaunchConfiguration('unified_map_topic'),
+            'publish_unified_map': True,      # Publish the unified map
+            'include_all_objects': True,      # Include all detected objects
+            'enhance_map_with_all_sensors': True, # Use data from all sensors
+            'use_high_quality_mode': True,    # Use high quality mode for better map
+            'add_timestamp_to_filename': LaunchConfiguration('add_timestamp_to_filename'),
+            
+            # Additional unified map enhancement parameters
+            'unified_map_resolution': LaunchConfiguration('map_resolution'),
+            'unified_map_quality': LaunchConfiguration('unified_map_quality'),
+            'unified_map_format': LaunchConfiguration('unified_map_format'),
+            'enhanced_radar_integration': LaunchConfiguration('enhanced_radar_integration'),
+            'enhanced_lidar_integration': LaunchConfiguration('enhanced_lidar_integration'),
+            'radar_confidence_threshold': 0.1, # Lower threshold to include more radar detections
+            'lidar_confidence_threshold': 0.1, # Lower threshold to include more LiDAR detections
+            'combine_close_detections': True,  # Combine nearby detections for cleaner map
+            'filter_noise': True,              # Filter noise for cleaner map
+            'preserve_thin_obstacles': True,   # Preserve thin obstacles that might be filtered otherwise
+            'preserve_distant_obstacles': True, # Make sure distant obstacles are included
+            'force_save_on_shutdown': LaunchConfiguration('force_save_on_shutdown'),
+            'max_map_age_before_save': 60.0,   # Save map at least every 60 seconds
+            'extra_safety_expansion': 1.0,     # Expand obstacles slightly for safety
+            'add_map_metadata': True,          # Include metadata in saved map
+            'metadata_format': 'yaml',         # Format for metadata
         }],
         output='screen'
     )
@@ -1132,6 +1301,15 @@ def generate_launch_description():
         
         # Add IMU frame parameters
         declare_imu_frame_id,
+        
+        # Add unified map parameters
+        declare_unified_map_topic,
+        declare_unified_map_quality,
+        declare_unified_map_format,
+        declare_enhanced_radar_integration,
+        declare_enhanced_lidar_integration,
+        declare_add_timestamp_to_filename,
+        declare_force_save_on_shutdown,
         
         # TF Tree Nodes - Launch these first to establish the TF tree
         world_to_map_node,

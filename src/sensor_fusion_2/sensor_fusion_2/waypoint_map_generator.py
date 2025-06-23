@@ -39,6 +39,7 @@ class WaypointMapGenerator(Node):
         self.declare_parameter('free_value', 0)
         self.declare_parameter('waypoint_width', 1.0)  # meters
         self.declare_parameter('use_vehicle_frame', False)  # If true, map is centered on vehicle
+        self.declare_parameter('use_transient_local_durability', True)  # Use transient local durability
         
         # Get parameters
         self.map_frame_id = self.get_parameter('map_frame_id').get_parameter_value().string_value
@@ -53,31 +54,48 @@ class WaypointMapGenerator(Node):
         self.free_value = self.get_parameter('free_value').get_parameter_value().integer_value
         self.waypoint_width = self.get_parameter('waypoint_width').get_parameter_value().double_value
         self.use_vehicle_frame = self.get_parameter('use_vehicle_frame').get_parameter_value().bool_value
+        self.use_transient_local_durability = self.get_parameter('use_transient_local_durability').get_parameter_value().bool_value
         
         # Calculate map dimensions
         self.map_width = int(self.map_width_meters / self.map_resolution)
         self.map_height = int(self.map_height_meters / self.map_resolution)
         
-        # Set up QoS profiles
-        qos_profile = QoSProfile(
+        # Set up QoS profiles for publisher
+        pub_qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=10
         )
         
-        # Create publishers
+        # Set durability based on parameter for publisher
+        if self.use_transient_local_durability:
+            pub_qos_profile.durability = DurabilityPolicy.TRANSIENT_LOCAL
+            self.get_logger().info("Using TRANSIENT_LOCAL durability for binary map publisher")
+        else:
+            pub_qos_profile.durability = DurabilityPolicy.VOLATILE
+            self.get_logger().info("Using VOLATILE durability for binary map publisher")
+        
+        # Set up QoS profile for subscriber - typically VOLATILE is fine for marker arrays
+        sub_qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+            durability=DurabilityPolicy.VOLATILE
+        )
+        
+        # Create publishers with explicit QoS
         self.binary_map_publisher = self.create_publisher(
             OccupancyGrid,
             self.binary_topic,
-            qos_profile
+            pub_qos_profile
         )
         
-        # Create subscribers
+        # Create subscribers with appropriate QoS
         self.waypoint_subscriber = self.create_subscription(
             MarkerArray,
             self.waypoint_marker_topic,
             self.waypoint_callback,
-            qos_profile
+            sub_qos_profile
         )
         
         # Set up TF listener
@@ -100,6 +118,11 @@ class WaypointMapGenerator(Node):
         self.process_thread.start()
         
         self.get_logger().info("Waypoint map generator initialized")
+        self.get_logger().info(f"Publishing waypoint binary map to: {self.binary_topic}")
+        self.get_logger().info(f"Map dimensions: {self.map_width}x{self.map_height} cells, {self.map_width_meters}x{self.map_height_meters} meters")
+        self.get_logger().info(f"Map resolution: {self.map_resolution} meters/cell")
+        self.get_logger().info(f"Waypoint width: {self.waypoint_width} meters")
+        self.get_logger().info(f"Map frame ID: {self.map_frame_id}")
     
     def waypoint_callback(self, marker_array):
         """Process incoming waypoint markers"""
@@ -200,6 +223,8 @@ class WaypointMapGenerator(Node):
                 self.map_data = new_map
                 self.map_origin_x = origin_x
                 self.map_origin_y = origin_y
+                
+            self.get_logger().debug(f"Updated waypoint map with {len(waypoints)} waypoints")
                 
         except Exception as e:
             self.get_logger().error(f"Error updating map: {e}")

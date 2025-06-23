@@ -138,7 +138,7 @@ Visualization Manager:
     # Combined Binary Map (waypoints + semantic)
     - Alpha: 1.0
       Class: rviz_default_plugins/Map
-      Color Scheme: costmap
+      Color Scheme: map
       Draw Behind: false
       Enabled: true
       Name: Combined Binary Map
