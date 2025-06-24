@@ -307,7 +307,8 @@ def generate_launch_description():
     
     declare_save_directory = DeclareLaunchArgument(
         'save_directory',
-        default_value='/home/mostafa/GP/ROS2/maps/NewMaps',
+        # default_value='/home/mostafa/GP/ROS2/maps/NewMaps',
+        default_value='/home/shishtawy/Carla/ROS2/NewMaps',
         description='Directory to save map files'
     )
     
