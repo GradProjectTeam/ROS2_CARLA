@@ -1,13 +1,39 @@
 #!/usr/bin/env python3
 """
-Semantic Costmap Launch File - Balanced for Responsive Highway Navigation and Trajectory Planning
+Semantic Costmap Launch File - Fixed Map with Vehicle-Oriented Sensors
 
-This launch file has been tuned for balanced responsiveness with the following settings:
-- Moderate decay_time of 0.1s for responsive map updates without excessive flickering
-- Dynamic object decay time of 0.05s for timely fading of moving objects
-- Cell_memory set to 0.1s for responsive radar map updates
-- Max_tracking_age set to 0.2s for reliable object tracking
-- Marker_lifetime set to 0.1s for smooth visualization
+This launch file has been configured to create a fixed map while having sensors that rotate with the vehicle:
+- The map stays fixed at a single position (fixed to the odom frame)
+- LiDAR and radar sensors rotate with the vehicle as it turns
+- Sensor data is transformed into the fixed map frame
+- This provides a consistent global representation while maintaining accurate sensor orientation
+
+FIXED MAP WITH ROTATING SENSORS BENEFITS:
+- Map maintains a consistent position in space, not moving with the vehicle
+- Obstacles stay in the same location on the map as they're detected
+- Sensors maintain proper orientation relative to the vehicle
+- Allows for building a persistent map while accurately capturing vehicle heading
+- Ideal for navigation in environments where position consistency matters
+
+FRAME STRUCTURE:
+- odom: Root frame providing odometry reference
+  ├── base_link: Vehicle center frame (rotates as vehicle turns)
+  │   └── imu_link: Inertial measurement unit frame
+  │       ├── lidar_link: LiDAR sensor frame
+  │       └── radar_link: Radar sensor frame
+  └── local_map_link: Fixed local perception map frame (attached to odom)
+      └── waypoint_frame: Frame for waypoint visualization
+
+MAP CONFIGURATION:
+- The map is generated in the local_map_link frame which is fixed to the odom frame
+- Map origin remains stationary regardless of vehicle movement
+- Sensors rotate with the vehicle but data is transformed into the fixed map frame
+- This provides the best of both worlds: fixed map and properly oriented sensors
+
+SENSOR INTEGRATION:
+- All sensors (LiDAR, radar, IMU) rotate with the vehicle
+- Sensor data is properly transformed into the fixed map frame
+- Vehicle orientation is captured accurately for perception
 
 Enhanced Vegetation and Object Detection:
 - All detection weights maximized to 10.0 (maximum allowed)
@@ -62,6 +88,13 @@ USING THE UNIFIED MAP:
 - Control map saving with the enable_map_saving parameter (default: true)
 - Control map quality with unified_map_quality parameter (options: low, medium, high)
 - The directory is automatically created if it doesn't exist
+
+UPDATED TF TREE:
+- Simplified TF tree structure with odom as the root frame
+- IMU-based odometry for accurate vehicle positioning
+- Three main sensors: LiDAR, radar, and IMU
+- Local map frame for perception and planning
+- Waypoint frame for path visualization
 """
 
 import os
@@ -172,6 +205,20 @@ def generate_launch_description():
         'map_frame_id',
         default_value='map',
         description='Frame ID for the map'
+    )
+    
+    # Add odom frame parameter
+    declare_odom_frame_id = DeclareLaunchArgument(
+        'odom_frame_id',
+        default_value='odom',
+        description='Frame ID for the odometry frame'
+    )
+    
+    # Add local map frame parameter
+    declare_local_map_frame_id = DeclareLaunchArgument(
+        'local_map_frame_id',
+        default_value='local_map_link',
+        description='Frame ID for the local map'
     )
     
     # Semantic Costmap parameters - Updated from test1.yaml
@@ -626,31 +673,22 @@ def generate_launch_description():
         description='Save map on shutdown'
     )
     
-    # ==================== TF TREE CONFIGURATION ====================
-    # Root transform: world to map
-    world_to_map_node = Node(
+    # ==================== TF TREE CONFIGURATION - UPDATED ====================
+    # Root transform: map to odom
+    map_to_odom_node = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        name='tf_world_to_map',
-        arguments=['0', '0', '0', '0', '0', '0', 'world', 'map'],
+        name='tf_map_to_odom',
+        arguments=['0.0', '0.0', '0.0', '0', '0', '0', 'map', 'odom'],
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
     )
     
-    # Map to base_link transform
-    map_to_base_link_node = Node(
+    # Base odometry transform (will be updated dynamically by odometry)
+    odom_to_base_link_node = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        name='tf_map_to_base_link_static',
-        arguments=['0', '0', '0', '0', '0', '0', 'map', 'base_link'],
-        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
-    )
-    
-    # Map to waypoint_frame transform (fixed in map frame)
-    map_to_waypoint_node = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='tf_map_to_waypoint',
-        arguments=['0', '0', '0', '0', '0', '0', 'map', 'waypoint_frame'],
+        name='tf_odom_to_base_link',
+        arguments=['0', '0', '0', '0', '0', '0', 'odom', 'base_link'],
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
     )
     
@@ -672,7 +710,7 @@ def generate_launch_description():
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
     )
     
-    # IMU to LiDAR transform with rotation
+    # IMU to LiDAR transform
     imu_to_lidar_node = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
@@ -682,30 +720,134 @@ def generate_launch_description():
             '0.0',  # Y offset - centered on vehicle
             '0.4',  # Z offset - LiDAR is 0.4m above the IMU (1.9m - 1.5m)
             '0',    # Roll - no roll (0 degrees)
-            '0',    # Pitch - no pitch (0 degrees)
-            '90',   # Yaw - 90 degree rotation (looking to the side, matching CARLA config)
+            '3.14159',    # Pitch - no pitch (0 degrees)
+            '0',    # Yaw - 0 degrees (LiDAR looking forward, same as vehicle)
             'imu_link', 
             'lidar_link'
         ],
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
     )
     
-    # IMU to Radar transform with rotation
-    imu_to_radar_node = Node(
+    # Map to Radar transform - Fixed radar position in the map frame
+    map_to_radar_node = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        name='tf_imu_to_radar',
+        name='tf_map_to_radar',
         arguments=[
-            '1.5',  # X offset - Radar is 1.5m forward from IMU
-            '0.5',  # Y offset - Radar is 0.5m to the right of IMU
-            '0.4',  # Z offset - Radar is 0.4m above the IMU (1.9m - 1.5m)
-            '0',    # Roll - no roll (0 degrees)
+            '0.0',  # X offset - Radar is fixed at the map origin
+            '0.0',  # Y offset - centered at map origin
+            '1.9',  # Z offset - Radar is 1.9m above the ground
+            '3.14159',    # Roll - no roll (0 degrees)
             '0',    # Pitch - no pitch (0 degrees)
-            '0',    # Yaw - 0 degree rotation (looking forward, perpendicular to LiDAR)
-            'imu_link', 
+            '0',    # Yaw - 180 degrees (π radians) - Radar rotated 180 degrees around Z-axis
+            'map', 
             'radar_link'
         ],
         parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
+    )
+    
+    # Map to local_map_link transform - This connects the map frame to our local map frame
+    map_to_local_map_node = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='tf_map_to_local_map',
+        arguments=['0.0', '0.0', '0.0', '0', '0', '0', 'map', 'local_map_link'],
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
+    )
+    
+    # Local map to waypoint frame transform
+    local_map_to_waypoint_node = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='tf_local_map_to_waypoint',
+        arguments=[
+            '0.0',  # X offset
+            '0.0',  # Y offset
+            '0.0',  # Z offset
+            '0',    # Roll - no roll (0 degrees)
+            '0',    # Pitch - no pitch (0 degrees)
+            '0',    # Yaw - no yaw (0 degrees)
+            'local_map_link', 
+            'waypoint_frame'
+        ],
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
+    )
+    
+    # ==================== IMU LISTENER NODE ====================
+    imu_listener_node = Node(
+        package='sensor_fusion_2',
+        executable='imu_euler_visualizer_simple',  # Use the full version of the IMU visualizer
+        name='imu_euler_visualizer_simple',
+        parameters=[{
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'tcp_ip': LaunchConfiguration('imu_tcp_ip'),
+            'tcp_port': LaunchConfiguration('imu_tcp_port'),
+            'frame_id': 'imu_link',  # FIXED: Explicitly set frame_id
+            'world_frame_id': 'odom',  # FIXED: Explicitly set world_frame_id
+            'reconnect_interval': LaunchConfiguration('imu_reconnect_interval'),
+            'filter_window_size': 5,  # Use a moderate filter window size for smooth data
+            'queue_size': 20,  # Buffer size for IMU data
+            'publish_rate': 100.0,  # High rate for accurate motion compensation
+            'socket_buffer_size': 262144,
+            'enable_bias_correction': True,  # Enable gyro bias correction
+            'enable_complementary_filter': True,  # Use complementary filter for sensor fusion
+            'zero_velocity_threshold': 0.02,  # m/s^2
+            'yaw_offset': 0.0,  # No yaw offset by default
+            'road_plane_correction': True,  # Correct for road plane
+            'gravity_aligned': True,  # Align with gravity
+            'publish_tf': True,  # Ensure TF is published for IMU orientation
+            'broadcast_transform': True,  # Broadcast the IMU transform
+            'update_rate': 100.0,  # High update rate for smooth orientation tracking
+            'use_imu_orientation': True,  # Use IMU orientation data
+            'use_filtered_orientation': True,  # Use filtered orientation for smoother results
+            'use_local_frame': True,  # Explicitly use local frame
+            'local_frame_id': 'local_map_link',  # FIXED: Explicitly set local_frame_id
+            'tf_buffer_duration': 10.0,  # Increase TF buffer duration to handle timing issues
+            'tf_timeout': 1.0,  # Increase TF lookup timeout
+            'allow_time_offset': 0.5,  # Allow small time offsets in TF lookups
+            'publish_static_transforms': True,  # Publish static transforms
+            'transform_tolerance': 0.5,  # Set transform tolerance to handle timing issues
+        }],
+        output='screen'
+    )
+    
+    # ==================== IMU-BASED ODOMETRY NODE ====================
+    imu_odometry_node = Node(
+        package='robot_localization',
+        executable='ekf_node',
+        name='ekf_filter_node',
+        output='screen',
+        parameters=[{
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'frequency': 30.0,
+            'sensor_timeout': 0.1,
+            'two_d_mode': True,  # Set to True for planar motion (highway scenario)
+            'publish_tf': True,
+            'odom_frame': LaunchConfiguration('odom_frame_id'),
+            'base_link_frame': LaunchConfiguration('vehicle_frame_id'),
+            'world_frame': 'odom',  # Use odom as the world frame for local mapping
+            'imu0': '/imu/data',  # Topic published by imu_euler_visualizer_simple
+            'imu0_config': [False, False, False,  # x, y, z position
+                            False, False, True,     # roll, pitch, yaw
+                            False, False, False,  # x, y, z velocity
+                            False, False, True,     # roll, pitch, yaw rates
+                            False, False, True],    # x, y, z accelerations
+            'imu0_differential': False,
+            'imu0_relative': False,
+            'imu0_queue_size': 10,
+            'imu0_remove_gravitational_acceleration': True,
+            # Additional parameters for local mapping
+            'print_diagnostics': True,
+            'publish_acceleration': True,
+            'reset_on_time_jump': True,
+            'smooth_lagged_data': True,
+            'transform_time_offset': 0.1,  # ADDED: Add time offset for transforms
+            'transform_timeout': 0.5,  # ADDED: Increase transform timeout
+            'transform_tolerance': 1.0,  # ADDED: Increase transform tolerance
+            'reset_on_time_jump': False,  # ADDED: Don't reset on time jumps
+            'predict_to_current_time': True,  # ADDED: Predict to current time
+            'history_length': 10.0,  # ADDED: Increase history length
+        }]
     )
     
     # ==================== SENSOR NODES ====================
@@ -724,15 +866,16 @@ def generate_launch_description():
             'vehicle_height': LaunchConfiguration('vehicle_height'),
             'enable_motion_compensation': True,
             'use_imu_data': True,  # Use IMU data for motion compensation
-            'frame_id': 'lidar_link',
+            'frame_id': 'local_map_link',  # FIXED: Explicitly set frame_id to local_map_link
             'parent_frame_id': 'imu_link',  # Parent frame is now IMU link
-            'imu_frame_id': LaunchConfiguration('imu_frame_id'),  # Added IMU frame ID
+            'imu_frame_id': 'imu_link',  # FIXED: Explicitly set IMU frame ID
             'imu_topic': '/imu/data',  # Topic published by imu_euler_visualizer
-            'use_tf_transform': True,  # Make sure TF transform is enabled
+            'use_tf_transform': False,  # Don't rely on TF transforms for visualization
             'publish_grid_map': True,
             'map_topic': '/lidar/map',
-            'map_frame_id': 'map',  # Ensure map frame is set correctly
-            'point_size': 2.0,
+            'map_frame_id': 'local_map_link',  # FIXED: Explicitly set map_frame_id to local_map_link
+            'output_frame': 'local_map_link',  # FIXED: Explicitly set output_frame to local_map_link
+            'point_size': 0.2,  # Updated to match radar point size
             'cube_alpha': 0.8,
             'use_cluster_stats': True,
             'use_convex_hull': True,
@@ -749,6 +892,27 @@ def generate_launch_description():
             'min_point_distance': 0.0,
             'max_negative_z': -100.0,
             'verbose_logging': True,  # Enable verbose logging for debugging
+            'use_imu_orientation': True,  # Explicitly use IMU orientation data
+            'apply_imu_transform': True,  # Apply IMU transform to LiDAR data
+            'follow_imu_rotation': True,  # Ensure LiDAR follows IMU rotation
+            'sync_with_imu': True,  # Synchronize with IMU data
+            'use_local_coordinates': True,  # Ensure using local coordinates
+            'reference_frame': 'local_map_link',  # FIXED: Explicitly set reference_frame to local_map_link
+            'center_on_vehicle': False,  # Don't keep map centered on vehicle
+            'track_vehicle_position': False,  # Don't track vehicle position for a fixed map
+            'update_map_position': False,  # Don't update map position as vehicle moves
+            'vehicle_frame_id': 'base_link',  # FIXED: Explicitly set vehicle frame ID
+            'transform_points_to_map': True,  # Transform points from vehicle frame to fixed map frame
+            'use_fixed_map': True,  # Use fixed map configuration
+            'publish_in_map_frame': True,  # Publish points in map frame
+            'points_frame_id': 'local_map_link',  # FIXED: Explicitly set points_frame_id to local_map_link
+            'disable_tf_lookup': False,  # Enable TF lookup to ensure proper rotation
+            'radar_points_topic': '/radar/points',  # Add reference to radar points topic for sensor fusion
+            'enable_sensor_fusion': True,  # Enable fusion with radar data
+            'tf_buffer_duration': 10.0,  # ADDED: Increase TF buffer duration to handle timing issues
+            'tf_timeout': 1.0,  # ADDED: Increase TF lookup timeout
+            'allow_time_offset': 0.5,  # ADDED: Allow small time offsets in TF lookups
+            'transform_tolerance': 1.0,  # ADDED: Increase transform tolerance
         }],
         output='screen'
     )
@@ -773,10 +937,11 @@ def generate_launch_description():
             'velocity_arrow_scale': 1.0,
             'min_velocity_for_display': 0.0,  # Set to 0.0 to display all objects regardless of velocity
             'max_velocity_for_display': 30.0,
-            'frame_id': 'radar_link',
+            'frame_id': 'local_map_link',  # FIXED: Explicitly set frame_id to local_map_link
             'parent_frame_id': 'imu_link',  # Parent frame is now IMU link
-            'map_frame_id': 'map',
-            'use_tf_transform': True,  # Make sure TF transform is enabled
+            'map_frame_id': 'local_map_link',  # FIXED: Explicitly set map_frame_id to local_map_link
+            'output_frame': 'local_map_link',  # FIXED: Explicitly set output_frame to local_map_link
+            'use_tf_transform': False,  # Don't rely on TF transforms for visualization
             'points_topic': '/radar/points',
             'clusters_topic': '/radar/clusters',
             'velocity_vectors_topic': '/radar/velocity_vectors',
@@ -813,96 +978,29 @@ def generate_launch_description():
             'socket_timeout': 0.5,  # Increased timeout
             'enable_tcp_nodelay': True,
             'enable_socket_keepalive': True,
-        }],
-        output='screen'
-    )
-    
-    # Radar Object Detector Node - Updated from test1_radar.yaml
-    radar_object_detector_node = Node(
-        package='sensor_fusion_2',
-        executable='radar_object_detector',
-        name='radar_object_detector',
-        output='screen',
-        parameters=[{
-            'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'frame_id': 'radar_link',  # Unchanged
-            'map_frame_id': 'map',  # Unchanged
-            'points_topic': '/radar/points',  # Unchanged
-            'moving_objects_topic': '/radar/moving_objects',  # Unchanged
-            'static_objects_topic': '/radar/static_objects',  # Unchanged
-            'object_tracking_topic': '/radar/object_tracking',  # Unchanged
-            'min_points_per_cluster': 1,  # Keep at 1 to detect sparse clusters from low-profile cars
-            'cluster_distance_threshold': 0.8,  # Increased from 0.7 to 0.8 for better clustering of small objects
-            'static_velocity_threshold': 0.0,  # Set to 0.0 to detect all objects regardless of velocity
-            'moving_velocity_threshold': 0.0,  # Set to 0.0 to consider any movement as a moving object
-            'use_dbscan_clustering': True,  # Unchanged
-            'dbscan_epsilon': 0.8,  # Increased from 0.7 to 0.8 for better clustering of low-profile cars
-            'dbscan_min_samples': 1,  # Keep at 1 to detect even single-point low-profile cars
-            'track_objects': True,  # Unchanged
-            'max_tracking_age': 0.3,  # Increased from 0.2 to 0.3 for better tracking of intermittent detections
-            'min_track_confidence': 0.5,  # Reduced from 0.6 to 0.5 to maintain tracking of low-confidence detections
-            'verbose_logging': True,  # Keep enabled for debugging
-            'publish_rate': 60.0,  # Keep at 60.0 Hz for responsive updates
-            'moving_object_color_r': 1.0,  # Unchanged
-            'moving_object_color_g': 0.0,  # Unchanged
-            'moving_object_color_b': 0.0,  # Unchanged
-            'moving_object_color_a': 0.8,  # Unchanged
-            'static_object_color_r': 0.0,  # Unchanged
-            'static_object_color_g': 0.0,  # Unchanged
-            'static_object_color_b': 1.0,  # Unchanged
-            'static_object_color_a': 0.8,  # Unchanged
-            'marker_lifetime': 0.2,  # Increased from 0.1 to 0.2 for better visualization
-        }]
-    )
-    
-    # LiDAR Realtime Mapper Node
-    lidar_realtime_mapper_node = Node(
-        package='sensor_fusion_2',
-        executable='lidar_realtime_mapper',
-        name='lidar_realtime_mapper',
-        parameters=[{
-            'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'map_resolution': LaunchConfiguration('map_resolution'),
-            'map_width_meters': LaunchConfiguration('map_width_meters'),
-            'map_height_meters': LaunchConfiguration('map_height_meters'),
-            # Calculate origin dynamically - using float values instead of strings
-            'map_origin_x': -60.0,  # Half of highway width (120.0/2)
-            'map_origin_y': -60.0,  # Half of highway height (120.0/2)
-            'publish_rate': 5.0,
-            'process_rate': 10.0,
-            'map_topic': '/lidar/map',
-            'map_frame': LaunchConfiguration('map_frame_id'),
-        }],
-        output='screen'
-    )
-    
-    # Radar Map Generator Node - Updated from test2_radar.yaml
-    radar_map_generator_node = Node(
-        package='sensor_fusion_2',
-        executable='radar_map_generator',
-        name='radar_map_generator',
-        parameters=[{
-            'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'map_resolution': LaunchConfiguration('map_resolution'),
-            'map_width': LaunchConfiguration('map_width_meters'),
-            'map_height': LaunchConfiguration('map_height_meters'),
-            'map_frame': LaunchConfiguration('map_frame_id'),
-            'radar_topic': '/radar/points',
-            'map_topic': '/radar/map',
-            'publish_rate': 30.0,  # Keep at 30.0 for stable map updates
-            'use_velocity_filter': False,  # Keep disabled to include all points regardless of velocity
-            'use_temporal_filtering': True,
-            'min_velocity': 0.0,  # Keep at 0.0 to detect even stationary objects
-            'cell_memory': 0.3,  # Increased from current value to 0.3 for better persistence of detected objects
-            'obstacle_threshold': 0.0,  # Keep at minimum to detect all objects
-            'free_threshold': -0.3,  # Reduced from -0.2 to -0.3 to be more conservative about marking cells as free
-            'start_type_description_service': True,
-            'enable_fusion_layer': True,  # Keep enabled
-            'obstacle_value': 100,  # Maximum obstacle value
-            'publish_to_realtime_map': True,  # Added from test2_radar.yaml
-            'realtime_map_topic': '/realtime_map',  # Added from test2_radar.yaml
-            'use_reliable_qos': True,  # Added from test2_radar.yaml
-            'use_transient_local_durability': True,  # Added from test2_radar.yaml
+            'use_imu_orientation': True,  # Explicitly use IMU orientation data
+            'apply_imu_transform': True,  # Apply IMU transform to radar data
+            'follow_imu_rotation': True,  # Ensure radar follows IMU rotation
+            'sync_with_imu': True,  # Synchronize with IMU data
+            'imu_topic': '/imu/data',  # Topic published by imu_euler_visualizer
+            'imu_frame_id': 'imu_link',  # ADDED: Explicitly set IMU frame ID
+            'use_local_coordinates': True,  # Ensure using local coordinates
+            'reference_frame': 'local_map_link',  # FIXED: Explicitly set reference_frame to local_map_link
+            'center_on_vehicle': False,  # Don't keep map centered on vehicle
+            'track_vehicle_position': False,  # Don't track vehicle position for a fixed map
+            'update_map_position': False,  # Don't update map position as vehicle moves
+            'vehicle_frame_id': 'base_link',  # FIXED: Explicitly set vehicle frame ID
+            'transform_points_to_map': True,  # Transform points from vehicle frame to fixed map frame
+            'use_fixed_map': True,  # Use fixed map configuration
+            'publish_in_map_frame': True,  # Publish points in map frame
+            'points_frame_id': 'local_map_link',  # FIXED: Explicitly set points_frame_id to local_map_link
+            'disable_tf_lookup': False,  # FIXED: Enable TF lookup to ensure proper rotation
+            'target_frame': 'lidar_link',  # Add reference to lidar frame for sensor fusion
+            'enable_sensor_fusion': True,  # Enable fusion with lidar data
+            'tf_buffer_duration': 10.0,  # ADDED: Increase TF buffer duration to handle timing issues
+            'tf_timeout': 1.0,  # ADDED: Increase TF lookup timeout
+            'allow_time_offset': 0.5,  # ADDED: Allow small time offsets in TF lookups
+            'transform_tolerance': 1.0,  # ADDED: Increase transform tolerance
         }],
         output='screen'
     )
@@ -917,7 +1015,8 @@ def generate_launch_description():
             'map_resolution': LaunchConfiguration('map_resolution'),
             'map_width_meters': LaunchConfiguration('map_width_meters'),
             'map_height_meters': LaunchConfiguration('map_height_meters'),
-            'map_frame': LaunchConfiguration('map_frame_id'),
+            'map_frame': LaunchConfiguration('local_map_frame_id'),  # Use fixed local map frame
+            'vehicle_frame': LaunchConfiguration('vehicle_frame_id'),  # Reference vehicle frame
             'lidar_points_topic': '/lidar/points',
             'lidar_clusters_topic': '/lidar/cubes',
             'radar_points_topic': '/radar/points',
@@ -990,29 +1089,15 @@ def generate_launch_description():
             # Additional parameters for binary output
             'map_color_scheme': 'binary',  # Use binary color scheme (white=free, black=occupied)
             'convert_to_black_white': True,  # Convert map to black and white
+            
+            # Fixed-map configuration parameters
+            'use_fixed_map': True,  # Use fixed map instead of vehicle-centered map
+            'use_vehicle_frame': False,  # Don't use vehicle frame as reference for the map
+            'track_vehicle_position': False,  # Don't track vehicle position to maintain map position
+            'update_map_position': False,  # Don't update map position as vehicle moves
+            'reference_frame': LaunchConfiguration('local_map_frame_id'),  # Reference fixed map frame
+            'transform_sensor_data': True,  # Transform sensor data from vehicle frame to fixed map frame
         }],
-        output='screen'
-    )
-    
-    # RViz Node
-    rviz_node = Node(
-        package='rviz2',
-        executable='rviz2',
-        name='rviz2',
-        arguments=['-d', rviz_config_file],
-        parameters=[{
-            'use_sim_time': LaunchConfiguration('use_sim_time'),
-        }],
-        condition=IfCondition(LaunchConfiguration('show_rviz')),
-        output='screen'
-    )
-    
-    # Add rqt_reconfigure node for parameter tuning
-    rqt_reconfigure_node = Node(
-        package='rqt_reconfigure',
-        executable='rqt_reconfigure',
-        name='rqt_reconfigure',
-        condition=IfCondition(LaunchConfiguration('enable_tuning')),
         output='screen'
     )
     
@@ -1026,7 +1111,8 @@ def generate_launch_description():
             'tcp_port': LaunchConfiguration('waypoint_tcp_port'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
             'frame_id': 'waypoint_frame',  # Use waypoint_frame to keep waypoints fixed
-            'map_frame_id': LaunchConfiguration('map_frame_id'),
+            'map_frame_id': LaunchConfiguration('local_map_frame_id'),  # Explicitly use local map frame
+            'vehicle_frame_id': LaunchConfiguration('vehicle_frame_id'),  # Reference vehicle frame
             'waypoints_topic': '/carla/waypoints',
             'marker_topic': '/carla/waypoint_markers',
             'waypoint_marker_size': LaunchConfiguration('waypoint_marker_size'),
@@ -1040,13 +1126,19 @@ def generate_launch_description():
             'enable_tcp_nodelay': True,
             'enable_socket_keepalive': True,
             'verbose_logging': True,
-            'use_local_coordinates': LaunchConfiguration('use_local_coordinates'),
-            'fixed_origin': LaunchConfiguration('fixed_origin'),
+            'use_local_coordinates': True,  # Explicitly set to use local coordinates
+            'fixed_origin': True,  # Keep origin fixed relative to vehicle
             'persistent_markers': LaunchConfiguration('persistent_markers'),
             'clear_markers_on_update': False,  # Don't clear previous markers when new ones arrive
             'use_persistent_durability': True,  # Use persistent durability for markers
             'debug_mode': True,  # Enable debug mode for more detailed logging
             'publish_even_without_data': True,  # Publish empty maps even if no waypoint data is received
+            'center_on_vehicle': False,  # Don't keep waypoints centered on vehicle
+            'track_vehicle_position': False,  # Don't track vehicle position for a fixed map
+            'reference_frame': LaunchConfiguration('local_map_frame_id'),  # Reference fixed map frame
+            'transform_waypoints_to_map_frame': True,  # Transform waypoints to fixed map frame
+            'maintain_waypoint_history': True,  # Keep history of waypoints
+            'use_fixed_map': True,  # Use fixed map configuration
         }],
         output='screen'
     )
@@ -1061,7 +1153,7 @@ def generate_launch_description():
             'map_resolution': LaunchConfiguration('map_resolution'),
             'map_width_meters': LaunchConfiguration('map_width_meters'),
             'map_height_meters': LaunchConfiguration('map_height_meters'),
-            'map_frame_id': LaunchConfiguration('map_frame_id'),  # Use map frame for consistency
+            'map_frame_id': LaunchConfiguration('local_map_frame_id'),  # Explicitly use local map frame
             'publish_rate': 20.0,  # Increased publish rate for more frequent updates
             'waypoint_marker_topic': '/carla/waypoint_markers',
             'binary_topic': LaunchConfiguration('waypoint_binary_topic'),
@@ -1069,7 +1161,7 @@ def generate_launch_description():
             'occupied_value': 100,  # Force black for occupied cells
             'free_value': 0,        # Force white for free cells
             'waypoint_width': 7.0,  # Significantly increased width for better visibility
-            'use_vehicle_frame': False,  # Don't center on vehicle
+            'use_vehicle_frame': False,  # Don't center on vehicle since we use a fixed map
             'map_origin_x': LaunchConfiguration('map_origin_x'),
             'map_origin_y': LaunchConfiguration('map_origin_y'),
             'verbose_logging': True,  # Enable verbose logging
@@ -1097,6 +1189,13 @@ def generate_launch_description():
             'save_as_yaml': True,  # Save YAML metadata
             'enforce_binary_values': True,  # Ensure only binary values (0 or 100) are used
             'binary_threshold': 50,  # Threshold for binary conversion
+            'use_local_coordinates': True,  # Explicitly use local coordinates
+            'reference_frame': LaunchConfiguration('local_map_frame_id'),  # Reference fixed map frame
+            'vehicle_frame_id': LaunchConfiguration('vehicle_frame_id'),  # Reference vehicle frame
+            'center_on_vehicle': False,  # Don't keep map centered on vehicle
+            'track_vehicle_position': False,  # Don't track vehicle position for a fixed map
+            'update_map_position': False,  # Don't update map position as vehicle moves
+            'transform_waypoints': True,  # Transform waypoints from vehicle frame to fixed map frame
         }],
         output='screen'
     )
@@ -1108,7 +1207,8 @@ def generate_launch_description():
         name='binary_map_combiner',
         parameters=[{
             'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'map_frame_id': LaunchConfiguration('map_frame_id'),  # Use map frame explicitly
+            'map_frame_id': LaunchConfiguration('local_map_frame_id'),  # Explicitly use local map frame
+            'vehicle_frame_id': LaunchConfiguration('vehicle_frame_id'),  # Reference vehicle frame
             'publish_rate': 20.0,  # Increased from default for more frequent updates
             'semantic_binary_topic': LaunchConfiguration('binary_topic'),  # Explicitly set topic name
             'waypoint_binary_topic': LaunchConfiguration('waypoint_binary_topic'),  # Explicitly set topic name
@@ -1138,7 +1238,6 @@ def generate_launch_description():
             'publish_empty_map': True,  # Publish an empty map if no input maps are available
             'initial_map_publish': True,  # Publish an initial empty map on startup
             'publish_frequency': 1.0,  # Publish at least once per second
-            'wait_for_transform': False,  # Don't wait for transform to avoid blocking
             'map_color_scheme': 'binary',  # Use binary color scheme (white=free, black=occupied)
             'monitor_topics': True,  # Monitor input topics for changes
             'overlay_mode': 'waypoints_on_top',  # Always put waypoints on top
@@ -1181,33 +1280,39 @@ def generate_launch_description():
             'extra_safety_expansion': 1.0,     # Expand obstacles slightly for safety
             'add_map_metadata': True,          # Include metadata in saved map
             'metadata_format': 'yaml',         # Format for metadata
+            'use_local_coordinates': True,     # Explicitly use local coordinates
+            'reference_frame': LaunchConfiguration('vehicle_frame_id'),  # Reference vehicle frame
+            
+            # Fixed-map configuration parameters
+            'center_on_vehicle': False,  # Don't keep map centered on vehicle
+            'use_vehicle_frame': False,  # Don't use vehicle frame as reference
+            'track_vehicle_position': False,  # Don't track vehicle position for a fixed map
+            'update_map_position': False,  # Don't update map position as vehicle moves
+            'use_fixed_map': True,  # Use fixed map configuration
+            'transform_data': True,  # Transform data to fixed map frame
         }],
         output='screen'
     )
     
-    # IMU Listener Node
-    imu_listener_node = Node(
-        package='sensor_fusion_2',
-        executable='imu_euler_visualizer_simple',  # Use the full version of the IMU visualizer
-        name='imu_euler_visualizer_simple',
+    # RViz Node - Configured for local mapping visualization
+    rviz_node = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2',
+        arguments=['-d', rviz_config_file],
         parameters=[{
             'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'tcp_ip': LaunchConfiguration('imu_tcp_ip'),
-            'tcp_port': LaunchConfiguration('imu_tcp_port'),
-            'frame_id': LaunchConfiguration('imu_frame_id'),
-            'world_frame_id': 'map',  # Use map as the world frame
-            'reconnect_interval': LaunchConfiguration('imu_reconnect_interval'),
-            'filter_window_size': 5,  # Use a moderate filter window size for smooth data
-            'queue_size': 20,  # Buffer size for IMU data
-            'publish_rate': 100.0,  # High rate for accurate motion compensation
-            'socket_buffer_size': 262144,
-            'enable_bias_correction': True,  # Enable gyro bias correction
-            'enable_complementary_filter': True,  # Use complementary filter for sensor fusion
-            'zero_velocity_threshold': 0.02,  # m/s^2
-            'yaw_offset': 0.0,  # No yaw offset by default
-            'road_plane_correction': True,  # Correct for road plane
-            'gravity_aligned': True,  # Align with gravity
         }],
+        condition=IfCondition(LaunchConfiguration('show_rviz')),
+        output='screen'
+    )
+    
+    # Add rqt_reconfigure node for parameter tuning
+    rqt_reconfigure_node = Node(
+        package='rqt_reconfigure',
+        executable='rqt_reconfigure',
+        name='rqt_reconfigure',
+        condition=IfCondition(LaunchConfiguration('enable_tuning')),
         output='screen'
     )
     
@@ -1230,6 +1335,9 @@ def generate_launch_description():
         declare_waypoint_connection_timeout,
         declare_vehicle_frame_id,
         declare_map_frame_id,
+        # Add new frame IDs
+        declare_odom_frame_id,
+        declare_local_map_frame_id,
         declare_map_resolution,
         declare_map_width,
         declare_map_height,
@@ -1312,31 +1420,31 @@ def generate_launch_description():
         declare_force_save_on_shutdown,
         
         # TF Tree Nodes - Launch these first to establish the TF tree
-        world_to_map_node,
-        map_to_base_link_node,
-        map_to_waypoint_node,
+        map_to_odom_node,
+        odom_to_base_link_node,
         base_to_imu_node,
         imu_to_lidar_node,
-        imu_to_radar_node,
+        map_to_radar_node,
+        map_to_local_map_node,
+        local_map_to_waypoint_node,
         
         # Add a timing delay to ensure TF tree is established before other nodes start
         TimerAction(
             period=2.0,  # Wait 2 seconds for TF tree to be established
             actions=[
+                # IMU-based odometry node
+                imu_odometry_node,
+                
                 # Sensor Nodes
                 lidar_listener_node,
                 radar_listener_node,
-                radar_object_detector_node,
-                lidar_realtime_mapper_node,
-                radar_map_generator_node,
-                
-                # Waypoint Nodes
-                waypoint_listener_node,
-                waypoint_map_generator_node,
+                semantic_costmap_node,
                 
                 # Visualization and Integration Nodes
-                semantic_costmap_node,
+                waypoint_listener_node,
+                waypoint_map_generator_node,
                 binary_map_combiner_node,
+                
                 rviz_node,
                 rqt_reconfigure_node,
                 imu_listener_node
