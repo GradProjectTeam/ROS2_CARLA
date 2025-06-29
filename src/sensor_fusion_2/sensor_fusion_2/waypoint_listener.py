@@ -28,7 +28,7 @@ class WaypointListener(Node):
         super().__init__('waypoint_listener')
         
         # Declare parameters
-        self.declare_parameter('tcp_ip', '0.0.0.0')  # Listen on all interfaces
+        self.declare_parameter('tcp_ip', '127.0.0.1')  # Listen on all interfaces
         self.declare_parameter('tcp_port', 12343)
         self.declare_parameter('frame_id', 'base_link')
         self.declare_parameter('map_frame_id', 'map')
@@ -102,6 +102,10 @@ class WaypointListener(Node):
         # Setup TCP server
         self.setup_tcp_server()
         
+        # Flag to track connection status
+        self.is_connected = False
+        self.connection_event = threading.Event()
+        
         # Start processing threads
         self.server_thread = threading.Thread(target=self.accept_connections)
         self.server_thread.daemon = True
@@ -115,6 +119,9 @@ class WaypointListener(Node):
         self.status_timer = self.create_timer(5.0, self.log_status)
         
         self.get_logger().info("Waypoint listener initialized and waiting for connections")
+        
+        # Wait for initial connection
+        self.wait_for_connection()
         
     def setup_tcp_server(self):
         """Set up TCP server to listen for connections"""
@@ -146,6 +153,35 @@ class WaypointListener(Node):
             except Exception as e:
                 self.get_logger().error(f"Failed to set up TCP server: {e}")
                 return False
+    
+    def wait_for_connection(self):
+        """Wait for a client to connect before proceeding"""
+        self.get_logger().info(f"Waiting for a client to connect on port {self.tcp_port}...")
+        
+        # Wait for connection with timeout
+        connection_timeout = self.connection_timeout
+        wait_start_time = time.time()
+        
+        while not self.is_connected and self.running:
+            # Wait for the connection event with a short timeout to allow checking conditions
+            self.connection_event.wait(timeout=1.0)
+            
+            # Check if connected
+            if self.is_connected:
+                self.get_logger().info("Client connected successfully!")
+                return True
+            
+            # Check if we've exceeded the timeout
+            elapsed_time = time.time() - wait_start_time
+            if elapsed_time > connection_timeout:
+                self.get_logger().warn(f"Connection timeout after {connection_timeout} seconds. Continuing without connection.")
+                return False
+            
+            # Log waiting message every 5 seconds
+            if int(elapsed_time) % 5 == 0 and elapsed_time > 1:
+                self.get_logger().info(f"Still waiting for connection... ({int(elapsed_time)}/{int(connection_timeout)} seconds)")
+        
+        return self.is_connected
     
     def accept_connections(self):
         """Accept incoming connections and start receive thread for each client"""
@@ -179,6 +215,8 @@ class WaypointListener(Node):
                     
                     self.client_socket = client_socket
                     self.client_address = client_address
+                    self.is_connected = True
+                    self.connection_event.set()  # Signal that connection is established
                 
                 self.get_logger().info(f"Accepted connection from {client_address}")
                 connection_attempts = 0  # Reset connection attempts on successful connection
@@ -202,6 +240,8 @@ class WaypointListener(Node):
                         except:
                             pass
                         self.server_socket = None
+                    self.is_connected = False
+                    self.connection_event.clear()  # Reset connection event
                 
                 time.sleep(self.reconnect_interval)  # Wait before trying again
     
@@ -261,6 +301,9 @@ class WaypointListener(Node):
                             'lane_id': lane_id,
                             'lane_type': lane_type
                         })
+                        # # save waypoints to a file
+                        # with open('waypoints.txt', 'a') as f:
+                        #     f.write(f"{x}, {y}, {z}, {road_id}, {lane_id}, {lane_type}\n")
                     
                     # Put waypoints in queue, replacing old data if queue is full
                     if self.waypoint_queue.full():
@@ -296,18 +339,18 @@ class WaypointListener(Node):
                     break
                 time.sleep(0.1)  # Short delay before retry
         
-        # Clean up client connection
+        # Connection closed or error
         with self.connection_lock:
-            try:
-                client_socket.close()
-            except:
-                pass
-            
-            # Only clear the client_socket if this is still the active client
             if client_socket == self.client_socket:
+                self.get_logger().info("Client disconnected, waiting for new connection")
+                try:
+                    self.client_socket.close()
+                except:
+                    pass
                 self.client_socket = None
                 self.client_address = None
-                self.get_logger().info("Client disconnected")
+                self.is_connected = False
+                self.connection_event.clear()  # Reset connection event
     
     def process_waypoints(self):
         """Process waypoints from queue and publish them"""
@@ -506,29 +549,33 @@ class WaypointListener(Node):
                 self.get_logger().info("Waiting for client connection")
     
     def destroy_node(self):
-        """Clean up resources when node is destroyed"""
-        self.get_logger().info("Shutting down waypoint listener")
+        """Clean up resources when the node is shut down"""
         self.running = False
         
-        if self.server_thread and self.server_thread.is_alive():
-            self.server_thread.join(timeout=1.0)
-            
-        if self.process_thread and self.process_thread.is_alive():
-            self.process_thread.join(timeout=1.0)
-            
         with self.connection_lock:
             if self.client_socket:
                 try:
                     self.client_socket.close()
                 except:
                     pass
-                
+                self.client_socket = None
+            
             if self.server_socket:
                 try:
                     self.server_socket.close()
                 except:
                     pass
+                self.server_socket = None
             
+            self.is_connected = False
+            self.connection_event.set()  # Set event to unblock any waiting threads
+        
+        if self.server_thread and self.server_thread.is_alive():
+            self.server_thread.join(timeout=1.0)
+            
+        if self.process_thread and self.process_thread.is_alive():
+            self.process_thread.join(timeout=1.0)
+        
         super().destroy_node()
 
 def main(args=None):
