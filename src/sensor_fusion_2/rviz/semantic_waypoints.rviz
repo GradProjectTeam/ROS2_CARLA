@@ -18,6 +18,7 @@ Panels:
         - /Semantic Costmap1/Vegetation Layer1
         - /Semantic Costmap1/Dynamic Layer1
         - /3D Visualization1
+        - /DWA Planner1
       Splitter Ratio: 0.5
     Tree Height: 719
   - Class: rviz_common/Selection
@@ -529,6 +530,122 @@ Visualization Manager:
           
       Enabled: true
       Name: 3D Visualization
+      
+    # DWA Planner Group
+    - Class: rviz_common/Group
+      Displays:
+        # DWA Path
+        - Alpha: 1
+          Buffer Length: 1
+          Class: rviz_default_plugins/Path
+          Color: 25; 255; 0
+          Enabled: true
+          Head Diameter: 0.30000001192092896
+          Head Length: 0.20000000298023224
+          Length: 0.30000001192092896
+          Line Style: Lines
+          Line Width: 0.029999999329447746
+          Name: DWA Path
+          Offset:
+            X: 0
+            Y: 0
+            Z: 0
+          Pose Color: 255; 85; 255
+          Pose Style: None
+          Radius: 0.029999999329447746
+          Shaft Diameter: 0.10000000149011612
+          Shaft Length: 0.10000000149011612
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            Filter size: 10
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /dwa/planned_path
+          Value: true
+          Reference Frame: map
+        
+        # DWA Markers
+        - Class: rviz_default_plugins/MarkerArray
+          Enabled: true
+          Name: DWA Visualization
+          Namespaces:
+            {}
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /dwa/planned_path_markers
+          Value: true
+          Reference Frame: map
+        
+        # Black Areas
+        - Class: rviz_default_plugins/MarkerArray
+          Enabled: true
+          Name: Black Areas
+          Namespaces:
+            {}
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /dwa/black_areas
+          Value: true
+          Reference Frame: map
+        
+        # Lane Boundaries
+        - Class: rviz_default_plugins/MarkerArray
+          Enabled: true
+          Name: Lane Boundaries
+          Namespaces:
+            {}
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /dwa/lane_boundaries
+          Value: true
+          Reference Frame: map
+        
+        # Parking Spots
+        - Class: rviz_default_plugins/MarkerArray
+          Enabled: true
+          Name: Parking Spots
+          Namespaces:
+            {}
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /dwa/parking_spots
+          Value: true
+          Reference Frame: map
+        
+        # Velocity Commands
+        - Class: rviz_default_plugins/Twist
+          Enabled: true
+          Name: DWA Velocity
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /dwa/cmd_vel
+          Value: true
+          Arrow Width: 0.30000001192092896
+          Arrow Length: 0.30000001192092896
+          Axis Color: 255; 0; 0
+          Linear Color: 0; 255; 0
+          Angular Color: 0; 0; 255
+          Hide Small Values: true
+          Scale: 1.0
+          
+      Enabled: true
+      Name: DWA Planner
       
     # Path Planning
     - Alpha: 1
