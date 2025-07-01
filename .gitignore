@@ -18,3 +18,34 @@ src/carla_sensors/msg/
 src/carla_sensors/pcd/
 src/carla_sensors/resource/
 src/carla_sensors/test/
+
+
+maps/NewMaps/
+*.yaml
+*.log
+Documentation/
+# '~'                               frames_2025-04-20_19.14.45.pdf   run_radar_visualization.sh
+#  build                            frames_2025-04-20_20.27.40.gv    run_three_sensors_fusion.sh
+#  control                          frames_2025-04-20_20.27.40.pdf   semantic_costmap_complete.log
+#  data1.                           frames_2025-04-20_20.28.02.gv    src
+#  Docs_2                           frames_2025-04-20_20.28.02.pdf   test1_lidar.yaml
+#  Documentation                    fusion.md                        test1_radar.yaml
+#  file.md                          install                          test1_semantic
+#  frames_2025-04-20_18.29.56.gv    lidar_doc_version_1.md           test1.yaml
+#  frames_2025-04-20_18.29.56.pdf   log                              test2_radar.yaml
+#  frames_2025-04-20_18.30.53.gv    maps                             test2.yaml
+#  frames_2025-04-20_18.30.53.pdf   motion_planning                  test3.yaml
+#  frames_2025-04-20_18.35.14.gv    mpc_system.launch.log            tmp.log
+#  frames_2025-04-20_18.35.14.pdf   NewMaps                          waypoints.txt
+#  frames_2025-04-20_18.38.33.gv    Readme                           waypoint_visualization.launch.log
+#  frames_2025-04-20_18.38.33.pdf   README.md
+#  frames_2025-04-20_19.14.45.gv    run_lidar.sh
+build/
+install/
+log/
+frames_*
+
+motion_planning
+NewMaps
+Docs_2
+control

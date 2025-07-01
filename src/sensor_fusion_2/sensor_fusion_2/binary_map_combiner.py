@@ -30,7 +30,7 @@ class BinaryMapCombiner(Node):
         
         # Declare parameters
         self.declare_parameter('map_frame_id', 'map')
-        self.declare_parameter('publish_rate', 10.0)  # Hz
+        self.declare_parameter('publish_rate', 15.0)  # Hz
         self.declare_parameter('semantic_binary_topic', '/semantic_costmap/binary')
         self.declare_parameter('waypoint_binary_topic', '/waypoint_map/binary')
         self.declare_parameter('combined_binary_topic', '/combined_binary_map')
@@ -41,7 +41,7 @@ class BinaryMapCombiner(Node):
         self.declare_parameter('use_transient_local_durability', True)
         
         # Add new parameters for lane crossing detection
-        self.declare_parameter('lane_width', 3.5)  # meters
+        self.declare_parameter('lane_width', 2.5)  # meters
         self.declare_parameter('detect_lane_crossing_objects', True)
         self.declare_parameter('lane_safety_margin', 1.0)  # meters
         self.declare_parameter('lane_crossing_enhancement_radius', 2)  # cells

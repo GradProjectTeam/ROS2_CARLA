@@ -224,7 +224,7 @@ def generate_launch_description():
     # Semantic Costmap parameters - Updated from test1.yaml
     declare_map_resolution = DeclareLaunchArgument(
         'map_resolution',
-        default_value='0.5',  # Updated from 0.2 to 0.5
+        default_value='0.2',  # Updated from 0.2 to 0.5
         description='Resolution of the costmap in meters per cell'
     )
     
@@ -1160,7 +1160,7 @@ def generate_launch_description():
             'binary_updates_topic': '/waypoint_map/binary_updates',  # Use explicit string instead of concatenation
             'occupied_value': 100,  # Force black for occupied cells
             'free_value': 0,        # Force white for free cells
-            'waypoint_width': 7.0,  # Significantly increased width for better visibility
+            'waypoint_width': 3.0,  # Significantly increased width for better visibility
             'use_vehicle_frame': False,  # Don't center on vehicle since we use a fixed map
             'map_origin_x': LaunchConfiguration('map_origin_x'),
             'map_origin_y': LaunchConfiguration('map_origin_y'),

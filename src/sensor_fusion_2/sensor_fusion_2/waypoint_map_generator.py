@@ -37,7 +37,7 @@ class WaypointMapGenerator(Node):
         self.declare_parameter('binary_topic', '/waypoint_map/binary')
         self.declare_parameter('occupied_value', 100)
         self.declare_parameter('free_value', 0)
-        self.declare_parameter('waypoint_width', 1.0)  # meters
+        self.declare_parameter('waypoint_width', 0.5)  # meters
         self.declare_parameter('use_vehicle_frame', False)  # If true, map is centered on vehicle
         self.declare_parameter('use_transient_local_durability', True)  # Use transient local durability
         

@@ -35,7 +35,7 @@ class WaypointListener(Node):
         self.declare_parameter('waypoints_topic', '/carla/waypoints')
         self.declare_parameter('marker_topic', '/carla/waypoint_markers')
         self.declare_parameter('waypoint_marker_size', 0.2)
-        self.declare_parameter('waypoint_line_width', 0.1)
+        self.declare_parameter('waypoint_line_width', 0.05)
         self.declare_parameter('waypoint_lifetime', 0.5)
         self.declare_parameter('socket_buffer_size', 262144)
         self.declare_parameter('socket_timeout', 0.5)
