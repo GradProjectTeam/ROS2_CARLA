@@ -1,4 +1,38 @@
 #!/usr/bin/env python3
+"""
+LiDAR Point Cloud Clustering and Visualization Node
+================================================
+
+Authors: Shishtawy & Hendy
+Project: TechZ Autonomous Driving System
+
+OVERVIEW:
+This node processes clustered LiDAR point cloud data received via TCP/IP connection
+and provides comprehensive visualization in RViz. It handles real-time point cloud
+data, organizes points into clusters, and generates multiple visualization markers
+for better understanding of the environment.
+
+KEY FEATURES:
+- Real-time LiDAR data processing via TCP
+- Point cloud clustering visualization
+- Convex hull generation for clusters
+- Bounding box visualization
+- Cluster statistics and metrics
+- Color-coded cluster representation
+- RViz integration with multiple marker types
+
+VISUALIZATION COMPONENTS:
+1. Individual point markers
+2. Cluster centers
+3. Convex hulls
+4. Bounding boxes
+5. Text labels with cluster statistics
+6. Solid cubes for volume representation
+
+This node is essential for environmental perception in the TechZ autonomous
+driving system, providing detailed visualization of detected objects and obstacles.
+"""
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2, PointField
@@ -119,325 +153,317 @@ class LidarClient_clusters_2(Node):
 
     def report_stats(self):
         """Report statistics about data reception"""
-        now = time.time()
-        elapsed = now - self.last_receive_time
-        if elapsed > 0:
-            points_per_sec = self.points_received / elapsed
-            clusters_per_sec = self.clusters_received / elapsed
+        now = time.time()                                                   # Get current time
+        elapsed = now - self.last_receive_time                             # Calculate time since last report
+        if elapsed > 0:                                                    # Avoid division by zero
+            points_per_sec = self.points_received / elapsed                # Calculate points per second
+            clusters_per_sec = self.clusters_received / elapsed            # Calculate clusters per second
             
-            stats_msg = f'Stats: {points_per_sec:.1f} points/s, {clusters_per_sec:.1f} clusters/s'
-            self.get_logger().info(stats_msg)
+            stats_msg = f'Stats: {points_per_sec:.1f} points/s, {clusters_per_sec:.1f} clusters/s'  # Format stats message
+            self.get_logger().info(stats_msg)                             # Log statistics
             
-            self.points_received = 0
-            self.clusters_received = 0
-            self.last_receive_time = now
+            self.points_received = 0                                       # Reset points counter
+            self.clusters_received = 0                                     # Reset clusters counter
+            self.last_receive_time = now                                   # Update timing reference
 
     def receive_exact(self, size):
         """Helper function to receive exact number of bytes"""
-        data = b''
-        while len(data) < size:
-            packet = self.socket.recv(size - len(data))
-            if not packet:
+        data = b''                                                         # Initialize empty byte string
+        while len(data) < size:                                           # Keep reading until we have enough data
+            packet = self.socket.recv(size - len(data))                    # Read remaining bytes
+            if not packet:                                                # Check for connection closure
                 return None
-            data += packet
-        return data
+            data += packet                                                # Append received data
+        return data                                                       # Return complete data chunk
 
     def generate_colors(self, n):
         """Generate visually distinct colors using HSV color space"""
-        colors = []
-        for i in range(n):
-            # Use golden ratio to create well-distributed hues
-            h = (i * 0.618033988749895) % 1.0
-            s = 0.8 + 0.2 * (i % 2)  # Alternate between 0.8 and 1.0 saturation
-            v = 0.9  # Keep value high for visibility
+        colors = []                                                       # Initialize color list
+        for i in range(n):                                               # Generate n colors
+            h = (i * 0.618033988749895) % 1.0                            # Golden ratio for hue distribution
+            s = 0.8 + 0.2 * (i % 2)                                      # Alternate saturation values
+            v = 0.9                                                       # Constant brightness value
             
-            r, g, b = colorsys.hsv_to_rgb(h, s, v)
-            colors.append((r, g, b))
-        return colors
+            r, g, b = colorsys.hsv_to_rgb(h, s, v)                       # Convert HSV to RGB
+            colors.append((r, g, b))                                      # Store color tuple
+        return colors                                                     # Return color list
 
     def calculate_convex_hull_2d(self, points):
         """Calculate the 2D convex hull for a set of points (Graham scan algorithm)"""
-        if len(points) < 3:
+        if len(points) < 3:                                              # Handle degenerate cases
             return points
             
-        # Find the lowest point
-        lowest = min(range(len(points)), key=lambda i: (points[i][1], points[i][0]))
+        lowest = min(range(len(points)), key=lambda i: (points[i][1], points[i][0]))  # Find bottom-most point
         
-        # Sort points by polar angle with respect to the lowest point
-        def polar_angle(p):
+        def polar_angle(p):                                              # Calculate polar angle for sorting
             return math.atan2(p[1] - points[lowest][1], p[0] - points[lowest][0])
             
-        sorted_points = sorted(points, key=lambda p: (polar_angle(p), p[0], p[1]))
+        sorted_points = sorted(points, key=lambda p: (polar_angle(p), p[0], p[1]))  # Sort by polar angle
         
-        # Build the hull
-        hull = [sorted_points[0], sorted_points[1]]
+        hull = [sorted_points[0], sorted_points[1]]                      # Initialize hull with first two points
         
-        for i in range(2, len(sorted_points)):
-            while len(hull) > 1:
-                # Cross product to determine turn direction
-                x1, y1 = hull[-1][0] - hull[-2][0], hull[-1][1] - hull[-2][1]
-                x2, y2 = sorted_points[i][0] - hull[-1][0], sorted_points[i][1] - hull[-1][1]
-                cross_product = x1 * y2 - y1 * x2
+        for i in range(2, len(sorted_points)):                          # Process remaining points
+            while len(hull) > 1:                                         # Maintain convex property
+                x1, y1 = hull[-1][0] - hull[-2][0], hull[-1][1] - hull[-2][1]  # Vector from second-last to last point
+                x2, y2 = sorted_points[i][0] - hull[-1][0], sorted_points[i][1] - hull[-1][1]  # Vector to current point
+                cross_product = x1 * y2 - y1 * x2                        # Cross product for turn direction
                 
-                # If not a left turn, remove the last point
-                if cross_product <= 0:
+                if cross_product <= 0:                                   # Remove points making right/straight turns
                     hull.pop()
                 else:
-                    break
+                    break                                                # Left turn found, keep point
                     
-            hull.append(sorted_points[i])
+            hull.append(sorted_points[i])                                # Add current point to hull
             
-        return hull
+        return hull                                                      # Return completed convex hull
 
     def receive_data(self):
         try:
             # Receive number of clusters
-            data = self.receive_exact(4)
+            data = self.receive_exact(4)                                    # Read 4 bytes for cluster count
             if not data:
                 return
-            num_clusters = struct.unpack('!I', data)[0]
+            num_clusters = struct.unpack('!I', data)[0]                     # Unpack unsigned integer
             
-            if self.verbose_logging:
+            if self.verbose_logging:                                        # Optional debug output
                 self.get_logger().info(f'Receiving {num_clusters} clusters')
             
-            self.clusters_received += num_clusters
+            self.clusters_received += num_clusters                          # Update cluster statistics
             
-            # Create marker arrays
-            point_marker_array = MarkerArray()
-            hull_marker_array = MarkerArray()
-            cube_marker_array = MarkerArray()  # New marker array for cubes
+            # Create marker arrays for visualization
+            point_marker_array = MarkerArray()                             # For individual points
+            hull_marker_array = MarkerArray()                              # For convex hulls
+            cube_marker_array = MarkerArray()                              # For bounding cubes
             
-            # Generate cluster colors - more visually distinct
-            cluster_colors = self.generate_colors(max(8, num_clusters))
+            # Generate visually distinct colors for clusters
+            cluster_colors = self.generate_colors(max(8, num_clusters))     # At least 8 colors for distinction
 
-            all_points = []
-            total_points = 0
+            all_points = []                                                # Store all received points
+            total_points = 0                                               # Track total point count
             
-            # Clean up previous markers when needed
-            if num_clusters == 0:
+            # Handle empty data case
+            if num_clusters == 0:                                          # No clusters received
                 # Clear all markers by publishing empty arrays
-                self.marker_publisher.publish(MarkerArray())
-                self.hull_publisher.publish(MarkerArray())
-                self.cube_publisher.publish(MarkerArray())  # Clear cubes
+                self.marker_publisher.publish(MarkerArray())                # Clear point markers
+                self.hull_publisher.publish(MarkerArray())                  # Clear hull markers
+                self.cube_publisher.publish(MarkerArray())                  # Clear cube markers
                 return
             
             # Process each cluster
-            for cluster_id in range(num_clusters):
+            for cluster_id in range(num_clusters):                         # Iterate through clusters
                 # Get number of points in this cluster
-                size_data = self.receive_exact(4)
+                size_data = self.receive_exact(4)                          # Read 4 bytes for point count
                 if not size_data:
                     return
-                cluster_size = struct.unpack('!I', size_data)[0]
+                cluster_size = struct.unpack('!I', size_data)[0]           # Unpack unsigned integer
                 
-                if self.verbose_logging:
+                if self.verbose_logging:                                    # Optional debug output
                     self.get_logger().info(f'Cluster {cluster_id}: expecting {cluster_size} points')
                 
                 # Get color for this cluster
-                color = cluster_colors[cluster_id % len(cluster_colors)]
+                color = cluster_colors[cluster_id % len(cluster_colors)]    # Cycle through colors
                 
-                cluster_points = []
+                cluster_points = []                                           # Initialize points for this cluster
                 # Process each point in the cluster
-                for point_id in range(cluster_size):
-                    point_data = self.receive_exact(12)  # 3 * float32
+                for point_id in range(cluster_size):                        # Iterate through points
+                    point_data = self.receive_exact(12)                     # Read 12 bytes (3 float32s)
                     if not point_data:
                         return
-                    x, y, z = struct.unpack('!fff', point_data)
+                    x, y, z = struct.unpack('!fff', point_data)            # Unpack XYZ coordinates
                     
                     # Verify the data with more tolerant checks for valid LIDAR data
-                    if not (isinstance(x, float) and isinstance(y, float) and isinstance(z, float)):
+                    if not (isinstance(x, float) and isinstance(y, float) and isinstance(z, float)):  # Type check
                         self.get_logger().error(f'Invalid point data type: {type(x)}, {type(y)}, {type(z)}')
                         continue
                     
-                    # Check for NaN and Inf
+                    # Check for NaN and Inf values
                     if (math.isnan(x) or math.isnan(y) or math.isnan(z) or
-                        math.isinf(x) or math.isinf(y) or math.isinf(z)):
+                        math.isinf(x) or math.isinf(y) or math.isinf(z)):  # Invalid value check
                         continue
                         
                     # Very generous bounds checking (±10km) - just to catch truly absurd values
-                    if (abs(x) > 10000 or abs(y) > 10000 or abs(z) > 10000):
-                        if point_id % 1000 == 0:  # Only log occasionally
+                    if (abs(x) > 10000 or abs(y) > 10000 or abs(z) > 10000):  # Range validation
+                        if point_id % 1000 == 0:                           # Limit warning frequency
                             self.get_logger().warn(f'Filtered extreme value: {x}, {y}, {z}')
                         continue
                     
-                    # REMOVED: All filtering code related to vehicle points, distance, and Z values
-                    
-                    # Add the point
-                    cluster_points.append([x, y, z])
-                    all_points.append([x, y, z])
-                    total_points += 1
+                    # Add the valid point to collections
+                    cluster_points.append([x, y, z])                        # Add to cluster points
+                    all_points.append([x, y, z])                           # Add to all points
+                    total_points += 1                                      # Increment total count
 
                     # Create individual point markers if enabled
-                    if self.use_point_markers:
-                        marker = Marker()
-                        marker.header.frame_id = "map"
-                        marker.header.stamp = self.get_clock().now().to_msg()
-                        marker.ns = f"lidar_cluster_{cluster_id}"
-                        marker.id = total_points  # Unique ID for each point
-                        marker.type = Marker.SPHERE
-                        marker.action = Marker.ADD
+                    if self.use_point_markers:                             # Optional point visualization
+                        marker = Marker()                                  # Initialize marker
+                        marker.header.frame_id = "map"                     # Set coordinate frame
+                        marker.header.stamp = self.get_clock().now().to_msg()  # Set timestamp
+                        marker.ns = f"lidar_cluster_{cluster_id}"          # Namespace for organization
+                        marker.id = total_points                           # Unique marker ID
+                        marker.type = Marker.SPHERE                        # Sphere representation
+                        marker.action = Marker.ADD                         # Add/modify marker
                         
-                        marker.pose.position.x = x
-                        marker.pose.position.y = y
-                        marker.pose.position.z = z
+                        marker.pose.position.x = x                         # Set X coordinate
+                        marker.pose.position.y = y                         # Set Y coordinate
+                        marker.pose.position.z = z                         # Set Z coordinate
                         
-                        # Make points more visible
-                        marker.scale.x = self.point_size
-                        marker.scale.y = self.point_size
-                        marker.scale.z = self.point_size
+                        # Configure marker appearance
+                        marker.scale.x = self.point_size                   # Set X scale
+                        marker.scale.y = self.point_size                   # Set Y scale
+                        marker.scale.z = self.point_size                   # Set Z scale
                         
-                        marker.color.r = color[0]
-                        marker.color.g = color[1]
-                        marker.color.b = color[2]
-                        marker.color.a = 0.9  # More opaque for better visibility
+                        marker.color.r = color[0]                          # Set red component
+                        marker.color.g = color[1]                          # Set green component
+                        marker.color.b = color[2]                          # Set blue component
+                        marker.color.a = 0.9                               # Set transparency
                         
-                        point_marker_array.markers.append(marker)
+                        point_marker_array.markers.append(marker)          # Add to visualization
 
                 # Process the cluster if it has points
-                if cluster_points:
-                    self.points_received += len(cluster_points)
+                if cluster_points:                                          # Check for valid points
+                    self.points_received += len(cluster_points)             # Update point statistics
                     
                     # Calculate cluster center and dimensions
-                    center_x = sum(p[0] for p in cluster_points) / len(cluster_points)
-                    center_y = sum(p[1] for p in cluster_points) / len(cluster_points)
-                    center_z = sum(p[2] for p in cluster_points) / len(cluster_points)
+                    center_x = sum(p[0] for p in cluster_points) / len(cluster_points)  # Average X
+                    center_y = sum(p[1] for p in cluster_points) / len(cluster_points)  # Average Y
+                    center_z = sum(p[2] for p in cluster_points) / len(cluster_points)  # Average Z
                     
                     # Calculate dimensions and statistics
-                    min_x = min(p[0] for p in cluster_points)
-                    max_x = max(p[0] for p in cluster_points)
-                    min_y = min(p[1] for p in cluster_points)
-                    max_y = max(p[1] for p in cluster_points)
-                    min_z = min(p[2] for p in cluster_points)
-                    max_z = max(p[2] for p in cluster_points)
+                    min_x = min(p[0] for p in cluster_points)              # Minimum X coordinate
+                    max_x = max(p[0] for p in cluster_points)              # Maximum X coordinate
+                    min_y = min(p[1] for p in cluster_points)              # Minimum Y coordinate
+                    max_y = max(p[1] for p in cluster_points)              # Maximum Y coordinate
+                    min_z = min(p[2] for p in cluster_points)              # Minimum Z coordinate
+                    max_z = max(p[2] for p in cluster_points)              # Maximum Z coordinate
                     
-                    width = max_x - min_x
-                    length = max_y - min_y
-                    height = max_z - min_z
-                    volume = width * length * height
+                    width = max_x - min_x                                  # Calculate cluster width
+                    length = max_y - min_y                                 # Calculate cluster length
+                    height = max_z - min_z                                 # Calculate cluster height
+                    volume = width * length * height                       # Calculate cluster volume
                     
                     # Use POINTS type for efficient visualization of all cluster points
-                    points_marker = Marker()
-                    points_marker.header.frame_id = "map"
-                    points_marker.header.stamp = self.get_clock().now().to_msg()
-                    points_marker.ns = f"cluster_points_{cluster_id}"
-                    points_marker.id = 0
-                    points_marker.type = Marker.POINTS
-                    points_marker.action = Marker.ADD
+                    points_marker = Marker()                               # Initialize points marker
+                    points_marker.header.frame_id = "map"                  # Set coordinate frame
+                    points_marker.header.stamp = self.get_clock().now().to_msg()  # Set timestamp
+                    points_marker.ns = f"cluster_points_{cluster_id}"      # Set namespace
+                    points_marker.id = 0                                   # Set marker ID
+                    points_marker.type = Marker.POINTS                     # Use points visualization
+                    points_marker.action = Marker.ADD                      # Add/modify marker
                     
                     # Larger points for better visibility
-                    points_marker.scale.x = self.point_size * 0.7
-                    points_marker.scale.y = self.point_size * 0.7
+                    points_marker.scale.x = self.point_size * 0.7          # Set point width
+                    points_marker.scale.y = self.point_size * 0.7          # Set point height
                     
                     # Add all points to the POINTS marker
-                    for point in cluster_points:
-                        ros_point = Point()
-                        ros_point.x = point[0]
-                        ros_point.y = point[1]
-                        ros_point.z = point[2]
-                        points_marker.points.append(ros_point)
+                    for point in cluster_points:                           # Process each point
+                        ros_point = Point()                                # Create point message
+                        ros_point.x = point[0]                             # Set X coordinate
+                        ros_point.y = point[1]                             # Set Y coordinate
+                        ros_point.z = point[2]                             # Set Z coordinate
+                        points_marker.points.append(ros_point)             # Add point to marker
                         
                         # Add matching color for each point
-                        color_rgba = ColorRGBA()
-                        color_rgba.r = color[0]
-                        color_rgba.g = color[1]
-                        color_rgba.b = color[2]
-                        color_rgba.a = 1.0  # Fully opaque points
-                        points_marker.colors.append(color_rgba)
+                        color_rgba = ColorRGBA()                           # Create color message
+                        color_rgba.r = color[0]                            # Set red component
+                        color_rgba.g = color[1]                            # Set green component
+                        color_rgba.b = color[2]                            # Set blue component
+                        color_rgba.a = 1.0                                 # Set full opacity
+                        points_marker.colors.append(color_rgba)            # Add color to marker
                     
-                    point_marker_array.markers.append(points_marker)
+                    point_marker_array.markers.append(points_marker)       # Add to visualization
                     
                     # Add cluster center marker (larger sphere)
-                    center_marker = Marker()
-                    center_marker.header.frame_id = "map"
-                    center_marker.header.stamp = self.get_clock().now().to_msg()
-                    center_marker.ns = f"cluster_center_{cluster_id}"
-                    center_marker.id = 0
-                    center_marker.type = Marker.SPHERE
-                    center_marker.action = Marker.ADD
-                    center_marker.pose.position.x = center_x
-                    center_marker.pose.position.y = center_y
-                    center_marker.pose.position.z = center_z
-                    center_marker.scale.x = self.center_size
-                    center_marker.scale.y = self.center_size
-                    center_marker.scale.z = self.center_size
-                    center_marker.color.r = color[0]
-                    center_marker.color.g = color[1]
-                    center_marker.color.b = color[2]
-                    center_marker.color.a = 0.9
-                    point_marker_array.markers.append(center_marker)
+                    center_marker = Marker()                                # Initialize center marker
+                    center_marker.header.frame_id = "map"                   # Set coordinate frame
+                    center_marker.header.stamp = self.get_clock().now().to_msg()  # Set timestamp
+                    center_marker.ns = f"cluster_center_{cluster_id}"       # Set namespace
+                    center_marker.id = 0                                    # Set marker ID
+                    center_marker.type = Marker.SPHERE                      # Use sphere visualization
+                    center_marker.action = Marker.ADD                       # Add/modify marker
+                    center_marker.pose.position.x = center_x                # Set X coordinate
+                    center_marker.pose.position.y = center_y                # Set Y coordinate
+                    center_marker.pose.position.z = center_z                # Set Z coordinate
+                    center_marker.scale.x = self.center_size                # Set sphere diameter
+                    center_marker.scale.y = self.center_size                # Set sphere diameter
+                    center_marker.scale.z = self.center_size                # Set sphere diameter
+                    center_marker.color.r = color[0]                        # Set red component
+                    center_marker.color.g = color[1]                        # Set green component
+                    center_marker.color.b = color[2]                        # Set blue component
+                    center_marker.color.a = 0.9                             # Set transparency
+                    point_marker_array.markers.append(center_marker)        # Add to visualization
                     
                     # Add solid cube for the cluster 
-                    cube_marker = Marker()
-                    cube_marker.header.frame_id = "map"
-                    cube_marker.header.stamp = self.get_clock().now().to_msg()
-                    cube_marker.ns = f"cluster_cube_{cluster_id}"
-                    cube_marker.id = 0
-                    cube_marker.type = Marker.CUBE
-                    cube_marker.action = Marker.ADD
+                    cube_marker = Marker()                                  # Initialize cube marker
+                    cube_marker.header.frame_id = "map"                     # Set coordinate frame
+                    cube_marker.header.stamp = self.get_clock().now().to_msg()  # Set timestamp
+                    cube_marker.ns = f"cluster_cube_{cluster_id}"           # Set namespace
+                    cube_marker.id = 0                                      # Set marker ID
+                    cube_marker.type = Marker.CUBE                          # Use cube visualization
+                    cube_marker.action = Marker.ADD                         # Add/modify marker
                     
                     # Set cube position to cluster center
-                    cube_marker.pose.position.x = center_x
-                    cube_marker.pose.position.y = center_y
-                    cube_marker.pose.position.z = center_z
+                    cube_marker.pose.position.x = center_x                  # Set X coordinate
+                    cube_marker.pose.position.y = center_y                  # Set Y coordinate
+                    cube_marker.pose.position.z = center_z                  # Set Z coordinate
                     
                     # Set orientation (identity quaternion)
-                    cube_marker.pose.orientation.w = 1.0
+                    cube_marker.pose.orientation.w = 1.0                    # No rotation
                     
                     # Set cube dimensions
-                    cube_marker.scale.x = width
-                    cube_marker.scale.y = length
-                    cube_marker.scale.z = height
+                    cube_marker.scale.x = width                             # Set width
+                    cube_marker.scale.y = length                            # Set length
+                    cube_marker.scale.z = height                            # Set height
                     
                     # Set cube color (semi-transparent to see points inside)
-                    cube_marker.color.r = color[0]
-                    cube_marker.color.g = color[1]
-                    cube_marker.color.b = color[2]
-                    cube_marker.color.a = self.cube_alpha  # Adjustable transparency
+                    cube_marker.color.r = color[0]                          # Set red component
+                    cube_marker.color.g = color[1]                          # Set green component
+                    cube_marker.color.b = color[2]                          # Set blue component
+                    cube_marker.color.a = self.cube_alpha                   # Set transparency
                     
-                    cube_marker_array.markers.append(cube_marker)
+                    cube_marker_array.markers.append(cube_marker)           # Add to visualization
                     
                     # Add bounding box as a LINE_LIST
-                    box_marker = Marker()
-                    box_marker.header.frame_id = "map"
-                    box_marker.header.stamp = self.get_clock().now().to_msg()
-                    box_marker.ns = f"cluster_box_{cluster_id}"
-                    box_marker.id = 0
-                    box_marker.type = Marker.LINE_LIST
-                    box_marker.action = Marker.ADD
-                    box_marker.scale.x = 0.1  # Line width
-                    box_marker.color.r = color[0]
-                    box_marker.color.g = color[1]
-                    box_marker.color.b = color[2]
-                    box_marker.color.a = 1.0
+                    box_marker = Marker()                                   # Initialize box marker
+                    box_marker.header.frame_id = "map"                      # Set coordinate frame
+                    box_marker.header.stamp = self.get_clock().now().to_msg()  # Set timestamp
+                    box_marker.ns = f"cluster_box_{cluster_id}"             # Set namespace
+                    box_marker.id = 0                                       # Set marker ID
+                    box_marker.type = Marker.LINE_LIST                      # Use line list visualization
+                    box_marker.action = Marker.ADD                          # Add/modify marker
+                    box_marker.scale.x = 0.1                                # Set line width
+                    box_marker.color.r = color[0]                           # Set red component
+                    box_marker.color.g = color[1]                           # Set green component
+                    box_marker.color.b = color[2]                           # Set blue component
+                    box_marker.color.a = 1.0                                # Set full opacity
                     
                     # Define the 8 corners of the box
-                    corners = [
-                        (min_x, min_y, min_z), (max_x, min_y, min_z),
-                        (max_x, max_y, min_z), (min_x, max_y, min_z),
-                        (min_x, min_y, max_z), (max_x, min_y, max_z),
-                        (max_x, max_y, max_z), (min_x, max_y, max_z)
+                    corners = [                                             # Define box vertices
+                        (min_x, min_y, min_z), (max_x, min_y, min_z),      # Bottom face corners
+                        (max_x, max_y, min_z), (min_x, max_y, min_z),      # Bottom face corners
+                        (min_x, min_y, max_z), (max_x, min_y, max_z),      # Top face corners
+                        (max_x, max_y, max_z), (min_x, max_y, max_z)       # Top face corners
                     ]
                     
                     # Define the 12 lines of the box (each line connects 2 points)
-                    lines = [
-                        (0, 1), (1, 2), (2, 3), (3, 0),  # Bottom face
-                        (4, 5), (5, 6), (6, 7), (7, 4),  # Top face
-                        (0, 4), (1, 5), (2, 6), (3, 7)   # Connecting lines
+                    lines = [                                               # Define box edges
+                        (0, 1), (1, 2), (2, 3), (3, 0),                    # Bottom face edges
+                        (4, 5), (5, 6), (6, 7), (7, 4),                    # Top face edges
+                        (0, 4), (1, 5), (2, 6), (3, 7)                     # Vertical edges
                     ]
                     
                     # Add the points and lines to the marker
-                    for start_idx, end_idx in lines:
-                        start = corners[start_idx]
-                        end = corners[end_idx]
+                    for start_idx, end_idx in lines:                        # Process each line
+                        start = corners[start_idx]                          # Get start point
+                        end = corners[end_idx]                              # Get end point
                         
-                        p1 = Point()
-                        p1.x, p1.y, p1.z = start
-                        box_marker.points.append(p1)
+                        p1 = Point()                                        # Create start point
+                        p1.x, p1.y, p1.z = start                           # Set coordinates
+                        box_marker.points.append(p1)                        # Add to marker
                         
-                        p2 = Point()
-                        p2.x, p2.y, p2.z = end
-                        box_marker.points.append(p2)
+                        p2 = Point()                                        # Create end point
+                        p2.x, p2.y, p2.z = end                             # Set coordinates
+                        box_marker.points.append(p2)                        # Add to marker
                     
-                    hull_marker_array.markers.append(box_marker)
+                    hull_marker_array.markers.append(box_marker)            # Add to visualization
                     
                     # Calculate and display 2D convex hull if enabled
                     if self.use_convex_hull and len(cluster_points) >= 3:
@@ -516,28 +542,29 @@ class LidarClient_clusters_2(Node):
             self.hull_publisher.publish(hull_marker_array)
             self.cube_publisher.publish(cube_marker_array)  # Publish the cube markers
             
-            # Publish point cloud
+            # Create and publish point cloud message if points exist
             if all_points:
-                msg = PointCloud2()
-                msg.header.stamp = self.get_clock().now().to_msg()
-                msg.header.frame_id = 'map'
+                msg = PointCloud2()                                        # Initialize point cloud message
+                msg.header.stamp = self.get_clock().now().to_msg()         # Set current timestamp
+                msg.header.frame_id = 'map'                                # Set reference frame
                 
+                # Define point cloud structure (x,y,z floating point coordinates)
                 msg.fields = [
-                    PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
-                    PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
-                    PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+                    PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),    # X coordinate field
+                    PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),    # Y coordinate field
+                    PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),    # Z coordinate field
                 ]
                 
-                points_array = np.array(all_points, dtype=np.float32)
-                msg.height = 1
-                msg.width = len(all_points)
-                msg.is_bigendian = False
-                msg.point_step = 12
-                msg.row_step = msg.point_step * len(all_points)
-                msg.is_dense = True
-                msg.data = points_array.tobytes()
+                points_array = np.array(all_points, dtype=np.float32)      # Convert points to numpy array
+                msg.height = 1                                             # Unorganized cloud (single row)
+                msg.width = len(all_points)                                # Number of points
+                msg.is_bigendian = False                                   # Use little-endian byte order
+                msg.point_step = 12                                        # Size of each point (3 * float32)
+                msg.row_step = msg.point_step * len(all_points)            # Size of point cloud data
+                msg.is_dense = True                                        # No invalid points
+                msg.data = points_array.tobytes()                          # Serialize point data
                 
-                self.publisher.publish(msg)
+                self.publisher.publish(msg)                                # Publish to point cloud topic
             
         except Exception as e:
             self.get_logger().error(f'Error receiving data: {str(e)}')
@@ -545,14 +572,22 @@ class LidarClient_clusters_2(Node):
     # REMOVED: publish_vehicle_visualization method as it's no longer needed
 
     def __del__(self):
-        self.socket.close()
+        """Clean up resources by closing the TCP socket connection"""
+        self.socket.close()                                              # Close socket connection
 
 def main(args=None):
-    rclpy.init(args=args)
-    node = LidarClient_clusters_2()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    """
+    Main entry point for the LiDAR cluster visualization node.
+    Initializes ROS2, creates the node instance, and handles the main processing loop.
+    
+    Args:
+        args: Command line arguments passed to ROS2 (optional)
+    """
+    rclpy.init(args=args)                                               # Initialize ROS2 Python client library
+    node = LidarClient_clusters_2()                                     # Create instance of our LiDAR client node
+    rclpy.spin(node)                                                    # Process callbacks until shutdown is called
+    node.destroy_node()                                                 # Clean up node resources
+    rclpy.shutdown()                                                    # Shut down ROS2 client library
 
 if __name__ == '__main__':
-    main()
+    main()                                                             # Execute main function when script is run directly

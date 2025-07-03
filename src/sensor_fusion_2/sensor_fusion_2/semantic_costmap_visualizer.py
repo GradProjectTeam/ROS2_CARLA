@@ -1,24 +1,60 @@
 #!/usr/bin/env python3
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import PointCloud2
-from visualization_msgs.msg import Marker, MarkerArray
-from geometry_msgs.msg import Point, Quaternion, Pose
-from std_msgs.msg import ColorRGBA, String
-from nav_msgs.msg import OccupancyGrid
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
-import numpy as np
-import math
-import time
-from threading import Lock
-import tf2_ros
-from tf2_ros.buffer import Buffer
-from tf2_ros.transform_listener import TransformListener
-from std_srvs.srv import SetBool
-from rcl_interfaces.msg import ParameterDescriptor, FloatingPointRange, IntegerRange, SetParametersResult
-from rcl_interfaces.srv import GetParameters, SetParameters, ListParameters
-import os
-from datetime import datetime
+
+"""
+Semantic Costmap Visualizer for Autonomous Vehicle Navigation
+==========================================================
+
+Authors: Shishtawy & Hendy
+Project: TechZ Autonomous Driving System
+
+This node creates a multi-layered semantic costmap for autonomous vehicle navigation by:
+1. Processing LiDAR and radar sensor data to detect and classify objects
+2. Creating separate costmap layers for different object types (ground, obstacles, vegetation, etc.)
+3. Implementing temporal filtering and motion prediction for dynamic objects
+4. Generating binary maps for path planning
+5. Providing visualization tools for debugging and monitoring
+
+Key Features:
+- Multi-layer semantic classification
+- Dynamic object tracking
+- Temporal filtering with configurable decay rates
+- Enhanced low-profile vehicle detection
+- Real-time visualization in RViz
+- Configurable map saving capabilities
+
+Frame Structure:
+- map: Global reference frame
+- odom: Odometry frame
+- base_link: Vehicle base frame
+- sensor frames: LiDAR, radar, IMU
+
+Dependencies:
+- ROS2 Humble
+- NumPy
+- TF2
+- Visualization Messages
+"""
+
+import rclpy                                           # ROS2 Python client library
+from rclpy.node import Node                           # Base class for ROS2 nodes
+from sensor_msgs.msg import PointCloud2               # For point cloud data
+from visualization_msgs.msg import Marker, MarkerArray # For visualization markers
+from geometry_msgs.msg import Point, Quaternion, Pose # For geometric transforms
+from std_msgs.msg import ColorRGBA, String           # For color and string messages
+from nav_msgs.msg import OccupancyGrid              # For costmap publishing
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy  # QoS settings
+import numpy as np                                   # Numerical operations library
+import math                                         # Mathematical functions
+import time                                         # Time utilities
+from threading import Lock                          # Thread synchronization
+import tf2_ros                                      # TF2 for coordinate transforms
+from tf2_ros.buffer import Buffer                   # TF buffer for transform storage
+from tf2_ros.transform_listener import TransformListener  # For listening to transforms
+from std_srvs.srv import SetBool                    # Service for toggling features
+from rcl_interfaces.msg import ParameterDescriptor, FloatingPointRange, IntegerRange, SetParametersResult  # Parameter definitions
+from rcl_interfaces.srv import GetParameters, SetParameters, ListParameters  # Parameter services
+import os                                           # Operating system utilities
+from datetime import datetime                       # Date and time utilities
 
 class SemanticCostmapVisualizer(Node):
     """
@@ -57,195 +93,195 @@ class SemanticCostmapVisualizer(Node):
         self.enable_text_labels = self.get_parameter('enable_text_labels').value
         
         # Add new parameters for classification
-        self.ground_height_threshold = self.get_parameter('ground_height_threshold').value
-        self.vegetation_height_ratio = self.get_parameter('vegetation_height_ratio').value
-        self.building_width_threshold = self.get_parameter('building_width_threshold').value
-        self.dynamic_velocity_threshold = self.get_parameter('dynamic_velocity_threshold').value
+        self.ground_height_threshold = self.get_parameter('ground_height_threshold').value      # Maximum height for ground classification
+        self.vegetation_height_ratio = self.get_parameter('vegetation_height_ratio').value      # Height/width ratio for vegetation
+        self.building_width_threshold = self.get_parameter('building_width_threshold').value    # Minimum width for buildings
+        self.dynamic_velocity_threshold = self.get_parameter('dynamic_velocity_threshold').value # Speed threshold for dynamic objects
         
         # Add binary map parameters
-        self.enable_binary_output = self.get_parameter('enable_binary_output').value
-        self.binary_topic = self.get_parameter('binary_topic').value
-        self.occupied_value = self.get_parameter('occupied_value').value
-        self.free_value = self.get_parameter('free_value').value
-        self.binary_threshold = self.get_parameter('binary_threshold').value
-        self.convert_vegetation_to_occupied = self.get_parameter('convert_vegetation_to_occupied').value
-        self.convert_all_non_ground_to_occupied = self.get_parameter('convert_all_non_ground_to_occupied').value
+        self.enable_binary_output = self.get_parameter('enable_binary_output').value           # Enable binary map output
+        self.binary_topic = self.get_parameter('binary_topic').value                          # Topic for binary map
+        self.occupied_value = self.get_parameter('occupied_value').value                      # Value for occupied cells
+        self.free_value = self.get_parameter('free_value').value                             # Value for free cells
+        self.binary_threshold = self.get_parameter('binary_threshold').value                  # Threshold for binary conversion
+        self.convert_vegetation_to_occupied = self.get_parameter('convert_vegetation_to_occupied').value  # Treat vegetation as obstacles
+        self.convert_all_non_ground_to_occupied = self.get_parameter('convert_all_non_ground_to_occupied').value  # All non-ground as obstacles
         
         # Add parameters for ground inclusion in binary map
-        self.include_ground_in_binary = self.get_parameter('include_ground_in_binary').value
-        self.ground_as_occupied = self.get_parameter('ground_as_occupied').value
+        self.include_ground_in_binary = self.get_parameter('include_ground_in_binary').value  # Include ground in binary map
+        self.ground_as_occupied = self.get_parameter('ground_as_occupied').value             # Treat ground as occupied
         
         # Add marker lifetime parameter
-        self.marker_lifetime = self.get_parameter('marker_lifetime').value
+        self.marker_lifetime = self.get_parameter('marker_lifetime').value                   # Duration markers stay visible
         
         # Map saving parameters
-        self.enable_map_saving = self.get_parameter('enable_map_saving').value
-        self.save_directory = self.get_parameter('save_directory').value
-        self.save_interval = self.get_parameter('save_interval').value
-        self.save_binary_map = self.get_parameter('save_binary_map').value
-        self.save_combined_map = self.get_parameter('save_combined_map').value
-        self.save_layer_maps = self.get_parameter('save_layer_maps').value
-        self.last_save_time = time.time()
+        self.enable_map_saving = self.get_parameter('enable_map_saving').value                # Enable periodic map saving
+        self.save_directory = self.get_parameter('save_directory').value                      # Directory to save maps
+        self.save_interval = self.get_parameter('save_interval').value                        # Time between saves
+        self.save_binary_map = self.get_parameter('save_binary_map').value                    # Save binary version
+        self.save_combined_map = self.get_parameter('save_combined_map').value                # Save combined layers
+        self.save_layer_maps = self.get_parameter('save_layer_maps').value                    # Save individual layers
+        self.last_save_time = time.time()                                                     # Track last save time
         
         # Add new parameters for low car detection
-        self.enhance_low_cars = self.get_parameter('enhance_low_cars').value
-        self.low_car_height_threshold = self.get_parameter('low_car_height_threshold').value
-        self.car_detection_width = self.get_parameter('car_detection_width').value
+        self.enhance_low_cars = self.get_parameter('enhance_low_cars').value                  # Enable low car detection
+        self.low_car_height_threshold = self.get_parameter('low_car_height_threshold').value  # Min height for low cars
+        self.car_detection_width = self.get_parameter('car_detection_width').value            # Min width for car detection
         
         # Get the expansion radius parameters
-        self.car_expansion_radius = self.get_parameter('car_expansion_radius').value
-        self.obstacle_expansion_radius = self.get_parameter('obstacle_expansion_radius').value
-        self.dynamic_expansion_radius = self.get_parameter('dynamic_expansion_radius').value
+        self.car_expansion_radius = self.get_parameter('car_expansion_radius').value          # Expansion for car objects
+        self.obstacle_expansion_radius = self.get_parameter('obstacle_expansion_radius').value # Expansion for obstacles
+        self.dynamic_expansion_radius = self.get_parameter('dynamic_expansion_radius').value   # Expansion for dynamic objects
         
         # Create save directory if it doesn't exist
-        if self.enable_map_saving:
-            os.makedirs(self.save_directory, exist_ok=True)
+        if self.enable_map_saving:                                                            # Check if map saving is enabled
+            os.makedirs(self.save_directory, exist_ok=True)                                   # Create directory if needed
             self.get_logger().info(f'Map saving enabled. Maps will be saved to {self.save_directory}')
         
         # Add parameter callback
-        self.add_on_set_parameters_callback(self.parameters_callback)
+        self.add_on_set_parameters_callback(self.parameters_callback)                         # Register parameter change handler
         
         # Calculate map dimensions
-        self.map_width = int(self.map_width_meters / self.map_resolution)
-        self.map_height = int(self.map_height_meters / self.map_resolution)
-        self.map_origin_x = -self.map_width_meters / 2.0
-        self.map_origin_y = -self.map_height_meters / 2.0
+        self.map_width = int(self.map_width_meters / self.map_resolution)                    # Convert width to cells
+        self.map_height = int(self.map_height_meters / self.map_resolution)                  # Convert height to cells
+        self.map_origin_x = -self.map_width_meters / 2.0                                     # Set origin X coordinate
+        self.map_origin_y = -self.map_height_meters / 2.0                                    # Set origin Y coordinate
         
         # Initialize multi-layer costmap
-        self.initialize_costmap()
+        self.initialize_costmap()                                                            # Create empty costmap layers
         
         # Set up TF listener
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.tf_buffer = Buffer()                                                           # Create transform buffer
+        self.tf_listener = TransformListener(self.tf_buffer, self)                          # Create transform listener
         
         # Create QoS profile for map
-        map_qos = QoSProfile(
-            reliability=QoSReliabilityPolicy.RELIABLE,
-            history=QoSHistoryPolicy.KEEP_LAST,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-            depth=1
+        map_qos = QoSProfile(                                                               # Configure map QoS settings
+            reliability=QoSReliabilityPolicy.RELIABLE,                                      # Ensure reliable delivery
+            history=QoSHistoryPolicy.KEEP_LAST,                                            # Keep only latest message
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,                                # Save for late subscribers
+            depth=1                                                                         # Buffer size of 1
         )
         
         # Create QoS profile for sensor data
-        sensor_qos = QoSProfile(
-            reliability=QoSReliabilityPolicy.BEST_EFFORT,
-            history=QoSHistoryPolicy.KEEP_LAST,
-            durability=QoSDurabilityPolicy.VOLATILE,
-            depth=10
+        sensor_qos = QoSProfile(                                                           # Configure sensor QoS settings
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,                                  # Best-effort delivery
+            history=QoSHistoryPolicy.KEEP_LAST,                                            # Keep only latest message
+            durability=QoSDurabilityPolicy.VOLATILE,                                       # No saving for late subscribers
+            depth=10                                                                       # Buffer size of 10
         )
         
         # Create publishers for costmap layers
-        self.layer_publishers = {}
-        self.layer_visibility = {}
+        self.layer_publishers = {}                                                          # Dictionary of layer publishers
+        self.layer_visibility = {}                                                          # Track layer visibility states
         
-        for layer in ['ground', 'obstacle', 'vegetation', 'building', 'dynamic', 'combined']:
-            self.layer_publishers[layer] = self.create_publisher(
-                OccupancyGrid,
-                f'/semantic_costmap/{layer}',
-                map_qos
+        for layer in ['ground', 'obstacle', 'vegetation', 'building', 'dynamic', 'combined']:  # For each semantic layer
+            self.layer_publishers[layer] = self.create_publisher(                           # Create publisher for layer
+                OccupancyGrid,                                                              # Message type
+                f'/semantic_costmap/{layer}',                                               # Topic name
+                map_qos                                                                     # QoS profile
             )
-            self.layer_visibility[layer] = True
+            self.layer_visibility[layer] = True                                            # Initialize as visible
         
         # Create publisher for semantic markers
-        self.semantic_marker_pub = self.create_publisher(
-            MarkerArray,
-            '/semantic_costmap/markers',
-            10
+        self.semantic_marker_pub = self.create_publisher(                                  # Create marker publisher
+            MarkerArray,                                                                   # Message type
+            '/semantic_costmap/markers',                                                   # Topic name
+            10                                                                             # Queue size
         )
         
         # Create publisher for height map visualization
-        if self.enable_3d_visualization:
-            self.height_map_pub = self.create_publisher(
-                PointCloud2,
-                '/semantic_costmap/height_map',
-                10
+        if self.enable_3d_visualization:                                                   # If 3D viz enabled
+            self.height_map_pub = self.create_publisher(                                   # Create height map publisher
+                PointCloud2,                                                               # Message type
+                '/semantic_costmap/height_map',                                            # Topic name
+                10                                                                         # Queue size
             )
         
         # Create publisher for binary map
-        if self.enable_binary_output:
-            self.binary_map_pub = self.create_publisher(
-                OccupancyGrid,
-                self.binary_topic,
-                map_qos
+        if self.enable_binary_output:                                                     # If binary output enabled
+            self.binary_map_pub = self.create_publisher(                                  # Create binary map publisher
+                OccupancyGrid,                                                            # Message type
+                self.binary_topic,                                                        # Topic name
+                map_qos                                                                   # QoS profile
             )
             self.get_logger().info(f'Binary map will be published on {self.binary_topic}')
             self.get_logger().info(f'Binary threshold: {self.binary_threshold}, Occupied value: {self.occupied_value}, Free value: {self.free_value}')
         
         # Create subscribers
-        self.lidar_points_sub = self.create_subscription(
-            PointCloud2,
-            self.lidar_points_topic,
-            self.lidar_points_callback,
-            sensor_qos
+        self.lidar_points_sub = self.create_subscription(                                   # Subscribe to LiDAR points
+            PointCloud2,                                                                    # Message type
+            self.lidar_points_topic,                                                        # Topic name
+            self.lidar_points_callback,                                                     # Callback function
+            sensor_qos                                                                      # QoS profile
         )
         
-        self.lidar_clusters_sub = self.create_subscription(
-            MarkerArray,
-            self.lidar_clusters_topic,
-            self.lidar_clusters_callback,
-            sensor_qos
+        self.lidar_clusters_sub = self.create_subscription(                                # Subscribe to LiDAR clusters
+            MarkerArray,                                                                   # Message type
+            self.lidar_clusters_topic,                                                     # Topic name
+            self.lidar_clusters_callback,                                                  # Callback function
+            sensor_qos                                                                     # QoS profile
         )
         
-        self.radar_points_sub = self.create_subscription(
-            PointCloud2,
-            self.radar_points_topic,
-            self.radar_points_callback,
-            sensor_qos
+        self.radar_points_sub = self.create_subscription(                                  # Subscribe to radar points
+            PointCloud2,                                                                   # Message type
+            self.radar_points_topic,                                                       # Topic name
+            self.radar_points_callback,                                                    # Callback function
+            sensor_qos                                                                     # QoS profile
         )
         
-        self.radar_clusters_sub = self.create_subscription(
-            MarkerArray,
-            self.radar_clusters_topic,
-            self.radar_clusters_callback,
-            sensor_qos
+        self.radar_clusters_sub = self.create_subscription(                               # Subscribe to radar clusters
+            MarkerArray,                                                                  # Message type
+            self.radar_clusters_topic,                                                    # Topic name
+            self.radar_clusters_callback,                                                 # Callback function
+            sensor_qos                                                                    # QoS profile
         )
         
         # Create service for toggling layers
-        self.toggle_layer_srv = self.create_service(
-            SetBool,
-            '/semantic_costmap/toggle_layer',
-            self.toggle_layer_callback
+        self.toggle_layer_srv = self.create_service(                                       # Create layer toggle service
+            SetBool,                                                                       # Service type
+            '/semantic_costmap/toggle_layer',                                              # Service name
+            self.toggle_layer_callback                                                     # Callback function
         )
         
         # Create service for saving maps on demand
-        self.save_maps_srv = self.create_service(
-            SetBool,
-            '/semantic_costmap/save_maps',
-            self.save_maps_callback
+        self.save_maps_srv = self.create_service(                                         # Create map save service
+            SetBool,                                                                      # Service type
+            '/semantic_costmap/save_maps',                                                # Service name
+            self.save_maps_callback                                                       # Callback function
         )
         
         # Create timers
-        self.publish_timer = self.create_timer(
-            1.0 / self.publish_rate,
-            self.publish_costmap_layers
+        self.publish_timer = self.create_timer(                                          # Create publish timer
+            1.0 / self.publish_rate,                                                     # Timer period
+            self.publish_costmap_layers                                                  # Callback function
         )
         
-        if self.temporal_filtering:
+        if self.temporal_filtering:                                                      # If temporal filtering enabled
             # Use a more reasonable frequency (20 Hz) for temporal filtering to balance responsiveness and stability
-            self.filtering_timer = self.create_timer(
-                0.05,  # 20 Hz - reduced from 50 Hz for more stable behavior
-                self.apply_temporal_filtering
+            self.filtering_timer = self.create_timer(                                    # Create filtering timer
+                0.05,  # 20 Hz - reduced from 50 Hz for more stable behavior            # Timer period (50ms)
+                self.apply_temporal_filtering                                            # Callback function
             )
         
         # Create save timer if enabled
-        if self.enable_map_saving:
-            self.save_timer = self.create_timer(
-                self.save_interval,
-                self.save_maps
+        if self.enable_map_saving:                                                      # If map saving enabled
+            self.save_timer = self.create_timer(                                        # Create save timer
+                self.save_interval,                                                     # Timer period
+                self.save_maps                                                          # Callback function
             )
             self.get_logger().info(f'Maps will be saved every {self.save_interval} seconds')
         
         # Data storage
-        self.lidar_clusters = []
-        self.radar_clusters = []
-        self.dynamic_objects = {}  # For tracking dynamic objects
-        self.last_update_time = time.time()
-        self.height_map = np.zeros((self.map_height, self.map_width), dtype=np.float32)
+        self.lidar_clusters = []                                                         # Store LiDAR cluster data
+        self.radar_clusters = []                                                         # Store radar cluster data
+        self.dynamic_objects = {}                                                        # Track dynamic object states
+        self.last_update_time = time.time()                                             # Track last update time
+        self.height_map = np.zeros((self.map_height, self.map_width), dtype=np.float32) # Store height information
         
         # Thread safety
-        self.costmap_lock = Lock()
+        self.costmap_lock = Lock()                                                      # Mutex for thread safety
         
-        self.get_logger().info('Semantic Costmap Visualizer initialized')
+        self.get_logger().info('Semantic Costmap Visualizer initialized')               # Log initialization
         self.get_logger().info(f'Map dimensions: {self.map_width}x{self.map_height} cells')
         self.get_logger().info(f'Using balanced decay settings: decay_time={self.decay_time}s, dynamic_decay_time={self.dynamic_decay_time}s')
         self.get_logger().info(f'Temporal filtering running at 20 Hz to balance responsiveness and stability')
@@ -253,72 +289,72 @@ class SemanticCostmapVisualizer(Node):
     def add_dynamic_parameters(self):
         """Add dynamic parameters that can be reconfigured at runtime"""
         # Map parameters
-        self.declare_parameter(
+        self.declare_parameter(                                                          # Declare map resolution parameter
             'map_resolution', 
-            0.2,
+            0.2,                                                                         # Default: 0.2 meters/cell
             ParameterDescriptor(
                 description='Resolution of the costmap in meters per cell',
                 floating_point_range=[FloatingPointRange(
-                    from_value=0.05, 
-                    to_value=1.0, 
-                    step=0.05
+                    from_value=0.05,                                                     # Minimum resolution
+                    to_value=1.0,                                                        # Maximum resolution
+                    step=0.05                                                            # Resolution step size
                 )]
             )
         )
         
-        self.declare_parameter(
+        self.declare_parameter(                                                          # Declare map width parameter
             'map_width_meters', 
-            60.0,
+            60.0,                                                                        # Default: 60 meters
             ParameterDescriptor(
                 description='Width of the costmap in meters',
                 floating_point_range=[FloatingPointRange(
-                    from_value=10.0, 
-                    to_value=200.0, 
-                    step=10.0
+                    from_value=10.0,                                                     # Minimum width
+                    to_value=200.0,                                                      # Maximum width
+                    step=10.0                                                            # Width step size
                 )]
             )
         )
         
-        self.declare_parameter(
+        self.declare_parameter(                                                          # Declare map height parameter
             'map_height_meters', 
-            60.0,
+            60.0,                                                                        # Default: 60 meters
             ParameterDescriptor(
                 description='Height of the costmap in meters',
                 floating_point_range=[FloatingPointRange(
-                    from_value=10.0, 
-                    to_value=200.0, 
-                    step=10.0
+                    from_value=10.0,                                                     # Minimum height
+                    to_value=200.0,                                                      # Maximum height
+                    step=10.0                                                            # Height step size
                 )]
             )
         )
         
-        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('map_frame', 'map')                                       # Global reference frame name
         
         # Topic parameters
-        self.declare_parameter('lidar_points_topic', '/lidar/points')
-        self.declare_parameter('lidar_clusters_topic', '/lidar/cubes')
-        self.declare_parameter('radar_points_topic', '/radar/points')
-        self.declare_parameter('radar_clusters_topic', '/radar/clusters')
+        self.declare_parameter('lidar_points_topic', '/lidar/points')                    # LiDAR point cloud topic
+        self.declare_parameter('lidar_clusters_topic', '/lidar/cubes')                   # LiDAR cluster topic
+        self.declare_parameter('radar_points_topic', '/radar/points')                    # Radar point cloud topic
+        self.declare_parameter('radar_clusters_topic', '/radar/clusters')                # Radar cluster topic
         
         # Performance parameters
-        self.declare_parameter(
+        self.declare_parameter(                                                          # Declare publish rate parameter
             'publish_rate', 
-            10.0,
+            10.0,                                                                        # Default: 10 Hz
             ParameterDescriptor(
                 description='Rate at which to publish costmap layers (Hz)',
                 floating_point_range=[FloatingPointRange(
-                    from_value=1.0, 
-                    to_value=100.0,  # Changed from 30.0 to 100.0 to support ultra-fast publishing
-                    step=1.0
+                    from_value=1.0,                                                      # Minimum rate
+                    to_value=100.0,                                                      # Maximum rate (increased for ultra-fast)
+                    step=1.0                                                             # Rate step size
                 )]
             )
         )
         
         # Feature flags
-        self.declare_parameter('temporal_filtering', True)
-        self.declare_parameter('motion_prediction', True)
-        self.declare_parameter('enable_3d_visualization', True)
-        self.declare_parameter('enable_text_labels', True)
+        self.declare_parameter('temporal_filtering', True)                               # Enable temporal smoothing
+        self.declare_parameter('motion_prediction', True)                                # Enable motion prediction
+        self.declare_parameter('enable_3d_visualization', True)                          # Enable 3D visualization
+        self.declare_parameter('enable_text_labels', True)                               # Enable text labels in RViz
         
         # Classification parameters
         self.declare_parameter(
@@ -362,134 +398,134 @@ class SemanticCostmapVisualizer(Node):
         )
         
         # Add marker lifetime parameter
-        self.declare_parameter(
+        self.declare_parameter(                                                          # Declare marker lifetime
             'marker_lifetime', 
-            0.01,  # Ultra-fast marker lifetime
+            0.01,                                                                        # Default: 10ms (ultra-fast)
             ParameterDescriptor(
                 description='Lifetime of visualization markers in seconds',
                 floating_point_range=[FloatingPointRange(
-                    from_value=0.001,
-                    to_value=5.0,
-                    step=0.001
+                    from_value=0.001,                                                    # Minimum lifetime
+                    to_value=5.0,                                                        # Maximum lifetime
+                    step=0.001                                                           # Time step size
                 )]
             )
         )
         
         # Add new classification parameters
-        self.declare_parameter(
+        self.declare_parameter(                                                          # Declare ground height threshold
             'ground_height_threshold', 
-            0.3,
+            0.3,                                                                         # Default: 30cm
             ParameterDescriptor(
                 description='Maximum height for ground classification (m)',
                 floating_point_range=[FloatingPointRange(
-                    from_value=0.05,  # Changed from 0.1 to 0.05 to allow lower values for better low car detection
-                    to_value=1.0, 
-                    step=0.05
+                    from_value=0.05,                                                     # Minimum height
+                    to_value=1.0,                                                        # Maximum height
+                    step=0.05                                                            # Height step size
                 )]
             )
         )
         
-        self.declare_parameter(
+        self.declare_parameter(                                                          # Declare vegetation ratio
             'vegetation_height_ratio', 
-            3.0,
+            3.0,                                                                         # Default: 3:1 height/width
             ParameterDescriptor(
                 description='Height to width ratio for vegetation classification',
                 floating_point_range=[FloatingPointRange(
-                    from_value=1.0, 
-                    to_value=10.0, 
-                    step=0.5
+                    from_value=1.0,                                                      # Minimum ratio
+                    to_value=10.0,                                                       # Maximum ratio
+                    step=0.5                                                             # Ratio step size
                 )]
             )
         )
         
-        self.declare_parameter(
+        self.declare_parameter(                                                          # Declare building width threshold
             'building_width_threshold', 
-            5.0,
+            5.0,                                                                         # Default: 5 meters
             ParameterDescriptor(
                 description='Minimum width for building classification (m)',
                 floating_point_range=[FloatingPointRange(
-                    from_value=2.0, 
-                    to_value=20.0, 
-                    step=0.5
+                    from_value=2.0,                                                      # Minimum width
+                    to_value=20.0,                                                       # Maximum width
+                    step=0.5                                                             # Width step size
                 )]
             )
         )
         
-        self.declare_parameter(
+        self.declare_parameter(                                                          # Declare dynamic velocity threshold
             'dynamic_velocity_threshold', 
-            0.5,
+            0.5,                                                                         # Default: 0.5 m/s
             ParameterDescriptor(
                 description='Minimum velocity for dynamic classification (m/s)',
                 floating_point_range=[FloatingPointRange(
-                    from_value=0.1, 
-                    to_value=10.0, 
-                    step=0.1
+                    from_value=0.1,                                                      # Minimum velocity
+                    to_value=10.0,                                                       # Maximum velocity
+                    step=0.1                                                             # Velocity step size
                 )]
             )
         )
         
         # Layer weight parameters
-        self.declare_parameter(
+        self.declare_parameter(                                                          # Declare ground layer weight
             'ground_weight', 
-            0.1,
+            0.1,                                                                         # Default: 0.1 (low weight)
             ParameterDescriptor(
                 description='Weight of ground layer in combined map',
                 floating_point_range=[FloatingPointRange(
-                    from_value=0.0, 
-                    to_value=10.0,
-                    step=0.1
+                    from_value=0.0,                                                      # Minimum weight
+                    to_value=10.0,                                                       # Maximum weight
+                    step=0.1                                                             # Weight step size
                 )]
             )
         )
         
-        self.declare_parameter(
+        self.declare_parameter(                                                          # Declare obstacle layer weight
             'obstacle_weight', 
-            1.0,
+            1.0,                                                                         # Default: 1.0 (full weight)
             ParameterDescriptor(
                 description='Weight of obstacle layer in combined map',
                 floating_point_range=[FloatingPointRange(
-                    from_value=0.0, 
-                    to_value=10.0,
-                    step=0.1
+                    from_value=0.0,                                                      # Minimum weight
+                    to_value=10.0,                                                       # Maximum weight
+                    step=0.1                                                             # Weight step size
                 )]
             )
         )
         
-        self.declare_parameter(
+        self.declare_parameter(                                                          # Declare vegetation layer weight
             'vegetation_weight', 
-            0.7,
+            0.7,                                                                         # Default: 0.7 (medium-high)
             ParameterDescriptor(
                 description='Weight of vegetation layer in combined map',
                 floating_point_range=[FloatingPointRange(
-                    from_value=0.0, 
-                    to_value=10.0,
-                    step=0.1
+                    from_value=0.0,                                                      # Minimum weight
+                    to_value=10.0,                                                       # Maximum weight
+                    step=0.1                                                             # Weight step size
                 )]
             )
         )
         
-        self.declare_parameter(
+        self.declare_parameter(                                                          # Declare building layer weight
             'building_weight', 
-            0.9,
+            0.9,                                                                         # Default: 0.9 (high weight)
             ParameterDescriptor(
                 description='Weight of building layer in combined map',
                 floating_point_range=[FloatingPointRange(
-                    from_value=0.0, 
-                    to_value=10.0,
-                    step=0.1
+                    from_value=0.0,                                                      # Minimum weight
+                    to_value=10.0,                                                       # Maximum weight
+                    step=0.1                                                             # Weight step size
                 )]
             )
         )
         
-        self.declare_parameter(
+        self.declare_parameter(                                                          # Declare dynamic layer weight
             'dynamic_weight', 
-            1.0,
+            1.0,                                                                         # Default: 1.0 (full weight)
             ParameterDescriptor(
                 description='Weight of dynamic layer in combined map',
                 floating_point_range=[FloatingPointRange(
-                    from_value=0.0, 
-                    to_value=10.0,
-                    step=0.1
+                    from_value=0.0,                                                      # Minimum weight
+                    to_value=10.0,                                                       # Maximum weight
+                    step=0.1                                                             # Weight step size
                 )]
             )
         )

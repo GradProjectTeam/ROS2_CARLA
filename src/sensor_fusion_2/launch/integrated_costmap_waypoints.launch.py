@@ -1,186 +1,180 @@
 #!/usr/bin/env python3
 """
-Semantic Costmap Launch File - Fixed Map with Vehicle-Oriented Sensors
+Integrated Costmap and Waypoints Launch File
+===========================================
 
-This launch file has been configured to create a fixed map while having sensors that rotate with the vehicle:
-- The map stays fixed at a single position (fixed to the odom frame)
-- LiDAR and radar sensors rotate with the vehicle as it turns
-- Sensor data is transformed into the fixed map frame
-- This provides a consistent global representation while maintaining accurate sensor orientation
+Authors: Shishtawy & Hendy
+Project: TechZ Autonomous Driving System
 
-FIXED MAP WITH ROTATING SENSORS BENEFITS:
-- Map maintains a consistent position in space, not moving with the vehicle
-- Obstacles stay in the same location on the map as they're detected
-- Sensors maintain proper orientation relative to the vehicle
-- Allows for building a persistent map while accurately capturing vehicle heading
-- Ideal for navigation in environments where position consistency matters
+OVERVIEW:
+This launch file orchestrates a comprehensive sensor fusion and mapping system for autonomous vehicles.
+It integrates multiple sensors (LiDAR, Radar, IMU) with waypoint navigation to create a unified
+perception and planning system for autonomous driving applications.
+
+KEY FEATURES:
+- Multi-sensor fusion (LiDAR, Radar, IMU)
+- Real-time semantic costmap generation
+- Dynamic obstacle detection and tracking
+- Waypoint-based navigation integration
+- Fixed map with vehicle-oriented sensors
+- Enhanced binary map output for navigation
+- Unified map combining all sensor data and waypoints
+
+SYSTEM ARCHITECTURE:
+1. Sensor Layer: LiDAR, Radar, IMU data collection
+2. Processing Layer: Semantic classification, obstacle detection
+3. Integration Layer: Sensor fusion, map generation
+4. Navigation Layer: Waypoint processing and visualization
+5. Output Layer: Binary and unified map generation
 
 FRAME STRUCTURE:
-- odom: Root frame providing odometry reference
-  ├── base_link: Vehicle center frame (rotates as vehicle turns)
-  │   └── imu_link: Inertial measurement unit frame
-  │       ├── lidar_link: LiDAR sensor frame
-  │       └── radar_link: Radar sensor frame
-  └── local_map_link: Fixed local perception map frame (attached to odom)
-      └── waypoint_frame: Frame for waypoint visualization
+- odom: Root frame (fixed)
+  ├── base_link: Vehicle center
+  │   └── imu_link: IMU sensor
+  │       └── lidar_link: LiDAR sensor
+  ├── map: Global reference frame
+  │   └── radar_link: Radar sensor (connected directly to map)
+  └── local_map_link: Fixed perception map
+      └── waypoint_frame: Navigation waypoints
+
+LAUNCH COMPONENTS:
+- TF Tree Nodes: Establish coordinate frame relationships
+- Sensor Nodes: Process LiDAR, radar, and IMU data
+- Costmap Nodes: Generate semantic and binary maps
+- Waypoint Nodes: Process and visualize navigation waypoints
+- Integration Nodes: Combine sensor data and waypoints
+- Visualization: RViz configuration for system monitoring
+
+PARAMETERS:
+- Network: TCP connections for sensor data streams
+- Frames: TF tree configuration
+- Map: Resolution, dimensions, and update rates
+- Sensor: Detection thresholds and filtering options
+- Processing: Temporal filtering and motion prediction
+- Visualization: 3D visualization and text label options
+- Output: Binary map thresholds and save options
 
 MAP CONFIGURATION:
-- The map is generated in the local_map_link frame which is fixed to the odom frame
-- Map origin remains stationary regardless of vehicle movement
-- Sensors rotate with the vehicle but data is transformed into the fixed map frame
-- This provides the best of both worlds: fixed map and properly oriented sensors
+- Fixed map with vehicle-oriented sensors
+- Map origin remains stationary while sensors rotate with vehicle
+- Sensor data transformed into fixed map frame
+- Combined binary map includes semantic data and waypoints
+- Maps saved to: /home/shishtawy/Documents/ROS2/maps/NewMaps
 
-SENSOR INTEGRATION:
-- All sensors (LiDAR, radar, IMU) rotate with the vehicle
-- Sensor data is properly transformed into the fixed map frame
-- Vehicle orientation is captured accurately for perception
+USAGE:
+- Launch with default parameters: ros2 launch sensor_fusion_2 integrated_costmap_waypoints.launch.py
+- Enable/disable RViz: show_rviz:=true|false
+- Control map saving: enable_map_saving:=true|false
+- Adjust map quality: unified_map_quality:=low|medium|high
 
-Enhanced Vegetation and Object Detection:
-- All detection weights maximized to 10.0 (maximum allowed)
-- Reduced vegetation_height_ratio to 2.0 for more sensitive vegetation detection
-- Binary_threshold set to 0.05 for reliable classification of obstacles
-- Added special conversion flags to ensure all vegetation and detections appear as black
-
-Binary Map Output for Navigation:
-- All detected objects (including vegetation) are converted to black for navigation
-- The binary map is published on the /semantic_costmap/binary topic
-- Uses standard values: 100 for occupied cells (black), 0 for free space
-- All layer weights maximized within allowed ranges (0.0-10.0)
-
-These balanced decay times make the system responsive while avoiding excessive
-flicker or instability. This provides a good balance between responsiveness and
-stability for highway navigation.
-
-Visualization notes:
-- Red cells represent dynamic objects (high cost areas)
-- Blue cells represent static obstacles (medium cost areas)
-- Green cells represent vegetation (also converted to black for navigation)
-- All non-ground detections are converted to black (occupied = 100) in the binary map
-- Cells fade to transparent/empty (value = 0) based on the decay times
-
-Added Waypoint Integration:
-- Waypoints from CARLA are received via TCP connection
-- Waypoints are visualized and added to the binary map
-- The combined binary map includes both semantic data and waypoints
-
-UNIFIED MAP CONFIGURATION:
-- This launch file has been modified to save only ONE combined map instead of multiple separate maps
-- The binary_map_combiner node is now the only node saving maps to disk
-- The unified map combines LiDAR data, radar data, and waypoints into a single comprehensive map
-- Individual map saving is disabled in the semantic_costmap_visualizer and waypoint_map_generator nodes
-
-UNIFIED MAP FEATURES:
-- High-quality integration of data from all available sensors (LiDAR, radar)
-- Complete inclusion of all detected objects, regardless of classification
-- Seamless integration of waypoints for path planning and navigation
-- Preservation of thin obstacles that might be filtered otherwise
-- Expanded obstacles for safe navigation
-- Map saves automatically at intervals specified by save_interval (default: 5.0 seconds)
-- Map also saves on system shutdown to prevent data loss
-- PGM format (image) with YAML metadata file for navigation stack compatibility
-- Unified map available on ROS topic: /unified_map
-- Enhanced parameters for fine-tuning the unified map's appearance and behavior
-
-USING THE UNIFIED MAP:
-- The unified map is the only map saved to disk, in the directory: /home/mostafa/GP/ROS2/maps/NewMaps
-- Each map is saved with a timestamp for uniqueness: unified_map_YYYYMMDD_HHMMSS.pgm
-- Maps can be loaded directly into ROS2 navigation2 stack using map_server
-- Control map saving with the enable_map_saving parameter (default: true)
-- Control map quality with unified_map_quality parameter (options: low, medium, high)
-- The directory is automatically created if it doesn't exist
-
-UPDATED TF TREE:
-- Simplified TF tree structure with odom as the root frame
-- IMU-based odometry for accurate vehicle positioning
-- Three main sensors: LiDAR, radar, and IMU
-- Local map frame for perception and planning
-- Waypoint frame for path visualization
+This system provides a robust foundation for autonomous navigation by combining
+multiple sensor inputs into a unified perception and planning framework.
 """
 
-import os
-from ament_index_python.packages import get_package_share_directory
-from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
-from launch.substitutions import LaunchConfiguration, TextSubstitution
-from launch_ros.actions import Node
-from launch.conditions import IfCondition
-import time  # Import time module for timestamp generation
+# Standard library imports
+import os                                                                 # File system operations and path manipulation
+import time                                                               # Time utilities for timestamps and delays
+
+# ROS2 package utilities
+from ament_index_python.packages import get_package_share_directory       # Resolves package paths in the ROS2 workspace
+
+# ROS2 launch framework imports
+from launch import LaunchDescription                                      # Main container for launch configurations
+from launch.actions import DeclareLaunchArgument                          # Defines configurable launch parameters
+from launch.actions import ExecuteProcess                                 # Executes system processes
+from launch.actions import TimerAction                                    # Schedules actions with delays
+from launch.substitutions import LaunchConfiguration                      # Resolves parameter values at runtime
+from launch.substitutions import TextSubstitution                         # Text replacement in launch configurations
+from launch_ros.actions import Node                                       # Creates and configures ROS2 nodes
+from launch.conditions import IfCondition                                 # Conditional execution of launch elements
 
 def generate_launch_description():
-    # Get the package share directory
-    pkg_share = get_package_share_directory('sensor_fusion_2')
+    """
+    Main function that generates the launch description for the integrated costmap and waypoints system.
     
-    # Define the path to the RViz configuration file
-    rviz_config_file = os.path.join(pkg_share, 'rviz', 'semantic_waypoints.rviz')
+    This function:
+    1. Sets up file paths and directories
+    2. Declares all configurable launch parameters
+    3. Configures the TF tree nodes for coordinate transformations
+    4. Sets up sensor processing nodes (LiDAR, Radar, IMU)
+    5. Configures mapping and visualization nodes
+    6. Organizes all components into a complete launch sequence
     
-    # Define default save directory and ensure it exists
-    # default_save_dir = '/home/mostafa/GP/ROS2/maps/NewMaps'
-    default_save_dir = '/home/shishtawy/Documents/ROS2/maps/NewMaps'
-
-    os.makedirs(default_save_dir, exist_ok=True)
+    Returns:
+        LaunchDescription: Complete launch configuration for the system
+    """
+    # Get the package share directory for accessing configuration files
+    pkg_share = get_package_share_directory('sensor_fusion_2')            # Locate the sensor_fusion_2 package directory
+    
+    # Define RViz config file path for visualization setup
+    rviz_config_file = os.path.join(pkg_share, 'rviz', 'semantic_waypoints.rviz')  # Path to RViz configuration
+    
+    # Set default map save directory with automatic creation
+    default_save_dir = '/home/shishtawy/Documents/ROS2/maps/NewMaps'      # Directory for saving generated maps
+    os.makedirs(default_save_dir, exist_ok=True)                          # Create directory if it doesn't exist
     
     # ==================== DECLARE LAUNCH ARGUMENTS ====================
-    # Common arguments
+    # Common arguments for simulation and visualization
     declare_use_sim_time = DeclareLaunchArgument(
         'use_sim_time',
-        default_value='false',
+        default_value='false',  # Default to real-time operation
         description='Use simulation time if true'
     )
     
     declare_show_rviz = DeclareLaunchArgument(
         'show_rviz',
-        default_value='true',
+        default_value='true',  # Enable visualization by default
         description='Show RViz visualization'
     )
     
-    # TCP connection parameters
+    # TCP connection parameters for sensor data streams
     declare_lidar_tcp_ip = DeclareLaunchArgument(
         'lidar_tcp_ip',
-        default_value='127.0.0.1',
+        default_value='127.0.0.1',  # Default to localhost for local testing
         description='IP address for LiDAR TCP connection'
     )
     
     declare_lidar_tcp_port = DeclareLaunchArgument(
         'lidar_tcp_port',
-        default_value='12350',
+        default_value='12350',  # Dedicated port for LiDAR data
         description='Port for LiDAR TCP connection'
     )
     
     declare_radar_tcp_ip = DeclareLaunchArgument(
         'radar_tcp_ip',
-        default_value='127.0.0.1',  # Use localhost as a safe default
+        default_value='127.0.0.1',  # Use localhost for radar connection
         description='IP address for radar TCP connection'
     )
     
     declare_radar_tcp_port = DeclareLaunchArgument(
         'radar_tcp_port',
-        default_value='12348',
+        default_value='12348',  # Dedicated port for radar data
         description='Port for radar TCP connection'
     )
     
-    # Add additional radar connection parameters
+    # Enhanced radar connection parameters for reliability
     declare_radar_reconnect_interval = DeclareLaunchArgument(
         'radar_reconnect_interval',
-        default_value='2.0',  # Increase from 1.0 to 2.0 for more time between retries
+        default_value='2.0',  # 2-second retry interval for stability
         description='Seconds between radar reconnection attempts'
     )
 
     declare_radar_connection_timeout = DeclareLaunchArgument(
         'radar_connection_timeout',
-        default_value='10.0',  # Increase from 5.0 to 10.0 for longer timeout
+        default_value='10.0',  # 10-second timeout for robust connection handling
         description='Timeout in seconds for radar connection attempts'
     )
     
-    # Add waypoint TCP connection parameters
+    # Waypoint communication setup
     declare_waypoint_tcp_ip = DeclareLaunchArgument(
         'waypoint_tcp_ip',
-        default_value='127.0.0.1',
+        default_value='127.0.0.1',  # Local connection for waypoints
         description='IP address for Waypoint TCP connection'
     )
     
     declare_waypoint_tcp_port = DeclareLaunchArgument(
         'waypoint_tcp_port',
-        default_value='12343',
+        default_value='12343',  # Dedicated port for waypoint data
         description='Port for Waypoint TCP connection'
     )
     
@@ -199,102 +193,101 @@ def generate_launch_description():
     # TF Tree parameters
     declare_vehicle_frame_id = DeclareLaunchArgument(
         'vehicle_frame_id',
-        default_value='base_link',
+        default_value='base_link',  # Standard ROS frame for vehicle base
         description='Frame ID for the vehicle'
     )
     
     declare_map_frame_id = DeclareLaunchArgument(
         'map_frame_id',
-        default_value='map',
+        default_value='map',  # Global reference frame
         description='Frame ID for the map'
     )
     
-    # Add odom frame parameter
     declare_odom_frame_id = DeclareLaunchArgument(
         'odom_frame_id',
-        default_value='odom',
+        default_value='odom',  # Odometry reference frame
         description='Frame ID for the odometry frame'
     )
     
-    # Add local map frame parameter
     declare_local_map_frame_id = DeclareLaunchArgument(
         'local_map_frame_id',
-        default_value='local_map_link',
+        default_value='local_map_link',  # Local perception map frame
         description='Frame ID for the local map'
     )
     
-    # Semantic Costmap parameters - Updated from test1.yaml
+    # Semantic Costmap core parameters for map generation
     declare_map_resolution = DeclareLaunchArgument(
         'map_resolution',
-        default_value='0.2',  # Updated from 0.2 to 0.5
+        default_value='0.2',  # 20cm resolution for detailed obstacle representation
         description='Resolution of the costmap in meters per cell'
     )
     
     declare_map_width = DeclareLaunchArgument(
         'map_width_meters',
-        default_value='120.0',  # Unchanged
+        default_value='120.0',  # 120-meter width for wide area coverage
         description='Width of the costmap in meters'
     )
     
     declare_map_height = DeclareLaunchArgument(
         'map_height_meters',
-        default_value='120.0',  # Unchanged
+        default_value='120.0',  # 120-meter height for extended perception
         description='Height of the costmap in meters'
     )
     
     declare_publish_rate = DeclareLaunchArgument(
         'publish_rate',
-        default_value='30.0',  # Reduced from 60.0 to 30.0 for more stable visualization
+        default_value='30.0',  # 30Hz update rate for smooth visualization
         description='Rate at which to publish costmap layers (Hz)'
     )
     
+    # Advanced costmap processing features
     declare_temporal_filtering = DeclareLaunchArgument(
         'temporal_filtering',
-        default_value='true',
+        default_value='true',  # Enable temporal smoothing of map updates
         description='Enable temporal filtering of costmap layers'
     )
     
     declare_motion_prediction = DeclareLaunchArgument(
         'motion_prediction',
-        default_value='false',
+        default_value='false',  # Disable motion prediction for static mapping
         description='Enable motion prediction for dynamic objects'
     )
     
-    # Classification parameters
+    # Object classification parameters
     declare_ground_height_threshold = DeclareLaunchArgument(
         'ground_height_threshold',
-        default_value='0.05',
+        default_value='0.05',  # 5cm threshold for ground point classification
         description='Maximum height for ground classification (meters)'
     )
     
     declare_vegetation_height_ratio = DeclareLaunchArgument(
         'vegetation_height_ratio',
-        default_value='2.0',
+        default_value='2.0',  # Height/width ratio for vegetation detection
         description='Height to width ratio for vegetation classification'
     )
     
     declare_building_width_threshold = DeclareLaunchArgument(
         'building_width_threshold',
-        default_value='5.0',
+        default_value='5.0',  # 5-meter minimum width for building detection
         description='Minimum width for building classification (meters)'
     )
     
     declare_dynamic_velocity_threshold = DeclareLaunchArgument(
         'dynamic_velocity_threshold',
-        default_value='0.1',
+        default_value='0.1',  # 0.1 m/s threshold for dynamic object detection
         description='Minimum velocity for dynamic classification (m/s)'
     )
     
-    # Layer weight parameters - Updated based on test2.yaml
+    # Layer weight configuration for map integration
     declare_ground_weight = DeclareLaunchArgument(
         'ground_weight',
-        default_value='5.0',  # Changed from 0.0 to 5.0 to include ground in the combined map
+        default_value='5.0',  # Moderate weight for ground layer influence
         description='Weight of ground layer in combined map'
     )
     
     declare_obstacle_weight = DeclareLaunchArgument(
         'obstacle_weight',
-        default_value='10.0',  # Increased to maximum allowed value (10.0) for clear visualization
+        default_value='10.0',  # Maximum weight for critical obstacle detection
         description='Weight of obstacle layer in combined map'
     )
     
@@ -676,103 +669,103 @@ def generate_launch_description():
     )
     
     # ==================== TF TREE CONFIGURATION - UPDATED ====================
-    # Root transform: map to odom
+    # Root transform: Establishes the relationship between map and odometry
     map_to_odom_node = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='tf_map_to_odom',
-        arguments=['0.0', '0.0', '0.0', '0', '0', '0', 'map', 'odom'],
-        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
+        package='tf2_ros',                                               # TF2 package for coordinate transforms
+        executable='static_transform_publisher',                         # Publishes fixed transforms
+        name='tf_map_to_odom',                                           # Node name for identification
+        arguments=['0.0', '0.0', '0.0', '0', '0', '0', 'map', 'odom'],  # Identity transform at origin (x,y,z,roll,pitch,yaw,parent,child)
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]  # Time source configuration
     )
     
-    # Base odometry transform (will be updated dynamically by odometry)
+    # Base odometry transform - Updated dynamically by IMU-based odometry
     odom_to_base_link_node = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='tf_odom_to_base_link',
-        arguments=['0', '0', '0', '0', '0', '0', 'odom', 'base_link'],
-        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
+        package='tf2_ros',                                               # TF2 package for coordinate transforms
+        executable='static_transform_publisher',                         # Initial static transform, later updated by EKF
+        name='tf_odom_to_base_link',                                     # Node name for identification
+        arguments=['0', '0', '0', '0', '0', '0', 'odom', 'base_link'],  # Initial identity transform (x,y,z,roll,pitch,yaw,parent,child)
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]  # Time source configuration
     )
     
-    # Base to IMU transform
+    # Base to IMU transform - Defines IMU mounting position on vehicle
     base_to_imu_node = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='tf_base_to_imu',
+        package='tf2_ros',                                               # TF2 package for coordinate transforms
+        executable='static_transform_publisher',                         # Publishes fixed transforms
+        name='tf_base_to_imu',                                           # Node name for identification
         arguments=[
-            '0.0',  # X offset - IMU is centered on the vehicle
-            '0.0',  # Y offset - centered on vehicle
-            '1.5',  # Z offset - IMU is 1.5m above the base
-            '0',    # Roll - no roll (0 degrees)
-            '0',    # Pitch - no pitch (0 degrees)
-            '0',    # Yaw - no yaw (0 degrees)
-            'base_link', 
-            'imu_link'
+            '0.0',  # X: Centered on vehicle longitudinally
+            '0.0',  # Y: Centered on vehicle laterally
+            '1.5',  # Z: IMU mounted 1.5m above base (roof height)
+            '0',    # Roll: No rotation around X axis
+            '0',    # Pitch: No rotation around Y axis
+            '0',    # Yaw: Forward-facing (no rotation around Z axis)
+            'base_link',  # Parent frame - vehicle reference
+            'imu_link'    # Child frame - IMU sensor location
         ],
-        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]  # Time source configuration
     )
     
-    # IMU to LiDAR transform
+    # IMU to LiDAR transform - Defines LiDAR mounting position relative to IMU
     imu_to_lidar_node = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='tf_imu_to_lidar',
+        package='tf2_ros',                                               # TF2 package for coordinate transforms
+        executable='static_transform_publisher',                         # Publishes fixed transforms
+        name='tf_imu_to_lidar',                                          # Node name for identification
         arguments=[
-            '1.5',  # X offset - LiDAR is 1.5m forward from IMU
-            '0.0',  # Y offset - centered on vehicle
-            '0.4',  # Z offset - LiDAR is 0.4m above the IMU (1.9m - 1.5m)
-            '0',    # Roll - no roll (0 degrees)
-            '3.14159',    # Pitch - no pitch (0 degrees)
-            '0',    # Yaw - 0 degrees (LiDAR looking forward, same as vehicle)
-            'imu_link', 
-            'lidar_link'
+            '1.5',      # X: LiDAR 1.5m forward of IMU (front of vehicle)
+            '0.0',      # Y: Centered on vehicle laterally
+            '0.4',      # Z: LiDAR 0.4m above IMU (higher on roof)
+            '0',        # Roll: No rotation around X axis
+            '3.14159',  # Pitch: 180 degrees (π radians) for upright mounting
+            '0',        # Yaw: Forward-facing (no rotation around Z axis)
+            'imu_link',    # Parent frame - IMU reference
+            'lidar_link'   # Child frame - LiDAR sensor location
         ],
-        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]  # Time source configuration
     )
     
     # Map to Radar transform - Fixed radar position in the map frame
     map_to_radar_node = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='tf_map_to_radar',
+        package='tf2_ros',                                               # TF2 package for coordinate transforms
+        executable='static_transform_publisher',                         # Publishes fixed transforms
+        name='tf_map_to_radar',                                          # Node name for identification
         arguments=[
-            '0.0',  # X offset - Radar is fixed at the map origin
-            '0.0',  # Y offset - centered at map origin
-            '1.9',  # Z offset - Radar is 1.9m above the ground
-            '3.14159',    # Roll - no roll (0 degrees)
-            '0',    # Pitch - no pitch (0 degrees)
-            '0',    # Yaw - 180 degrees (π radians) - Radar rotated 180 degrees around Z-axis
-            'map', 
-            'radar_link'
+            '0.0',      # X offset - Radar is fixed at the map origin
+            '0.0',      # Y offset - centered at map origin
+            '1.9',      # Z offset - Radar is 1.9m above the ground
+            '3.14159',  # Roll - 180 degrees (π radians) around X axis
+            '0',        # Pitch - no rotation around Y axis
+            '0',        # Yaw - no rotation around Z axis
+            'map',         # Parent frame - global map reference
+            'radar_link'   # Child frame - radar sensor location
         ],
-        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]  # Time source configuration
     )
     
     # Map to local_map_link transform - This connects the map frame to our local map frame
     map_to_local_map_node = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='tf_map_to_local_map',
-        arguments=['0.0', '0.0', '0.0', '0', '0', '0', 'map', 'local_map_link'],
-        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
+        package='tf2_ros',                                               # TF2 package for coordinate transforms
+        executable='static_transform_publisher',                         # Publishes fixed transforms
+        name='tf_map_to_local_map',                                      # Node name for identification
+        arguments=['0.0', '0.0', '0.0', '0', '0', '0', 'map', 'local_map_link'],  # Identity transform (x,y,z,roll,pitch,yaw,parent,child)
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]  # Time source configuration
     )
     
     # Local map to waypoint frame transform
     local_map_to_waypoint_node = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='tf_local_map_to_waypoint',
+        package='tf2_ros',                                               # TF2 package for coordinate transforms
+        executable='static_transform_publisher',                         # Publishes fixed transforms
+        name='tf_local_map_to_waypoint',                                 # Node name for identification
         arguments=[
-            '0.0',  # X offset
-            '0.0',  # Y offset
-            '0.0',  # Z offset
-            '0',    # Roll - no roll (0 degrees)
-            '0',    # Pitch - no pitch (0 degrees)
-            '0',    # Yaw - no yaw (0 degrees)
-            'local_map_link', 
-            'waypoint_frame'
+            '0.0',  # X offset - No horizontal offset from local map
+            '0.0',  # Y offset - No lateral offset from local map
+            '0.0',  # Z offset - Same height as local map
+            '0',    # Roll - no rotation around X axis
+            '0',    # Pitch - no rotation around Y axis
+            '0',    # Yaw - no rotation around Z axis
+            'local_map_link',  # Parent frame - local map reference
+            'waypoint_frame'   # Child frame - waypoint visualization frame
         ],
-        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]
+        parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}]  # Time source configuration
     )
     
     # ==================== IMU LISTENER NODE ====================
@@ -853,7 +846,7 @@ def generate_launch_description():
     )
     
     # ==================== SENSOR NODES ====================
-    # LiDAR Listener Node - Updated from test1_lidar.yaml
+    # LiDAR processing node - Handles point cloud processing and obstacle detection
     lidar_listener_node = Node(
         package='sensor_fusion_2',
         executable='lidar_listener_clusters_3',
@@ -862,7 +855,7 @@ def generate_launch_description():
             'tcp_ip': LaunchConfiguration('lidar_tcp_ip'),
             'tcp_port': LaunchConfiguration('lidar_tcp_port'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'filter_vehicle_points': True,
+            'filter_vehicle_points': True,  # Remove ego-vehicle points from scan
             'vehicle_length': LaunchConfiguration('vehicle_length'),          
             'vehicle_width': LaunchConfiguration('vehicle_width'),           
             'vehicle_height': LaunchConfiguration('vehicle_height'),
@@ -919,7 +912,7 @@ def generate_launch_description():
         output='screen'
     )
     
-    # Radar Listener Node - Updated from test1_radar.yaml
+    # Radar processing node - Handles velocity detection and dynamic object tracking
     radar_listener_node = Node(
         package='sensor_fusion_2',
         executable='radar_listener_clusters',
@@ -928,11 +921,11 @@ def generate_launch_description():
             'tcp_ip': LaunchConfiguration('radar_tcp_ip'),
             'tcp_port': LaunchConfiguration('radar_tcp_port'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'grid_resolution': 0.2,
+            'grid_resolution': 0.2,  # Match LiDAR resolution
             'grid_width': LaunchConfiguration('map_width_meters'),
             'grid_height': LaunchConfiguration('map_height_meters'),
-            'show_velocity_vectors': True,
-            'radar_to_map_fusion': True,
+            'show_velocity_vectors': True,  # Visualize object motion
+            'radar_to_map_fusion': True,  # Enable radar-map fusion
             'marker_lifetime': LaunchConfiguration('marker_lifetime'),
             'point_size': 0.2,
             'use_advanced_coloring': True,
@@ -995,7 +988,7 @@ def generate_launch_description():
             'transform_points_to_map': True,  # Transform points from vehicle frame to fixed map frame
             'use_fixed_map': True,  # Use fixed map configuration
             'publish_in_map_frame': True,  # Publish points in map frame
-            'points_frame_id': 'local_map_link',  # FIXED: Explicitly set points_frame_id to local_map_link
+            'points_frame_id': 'local_map_link',  # FIXED: Enable TF lookup to ensure proper rotation
             'disable_tf_lookup': False,  # FIXED: Enable TF lookup to ensure proper rotation
             'target_frame': 'lidar_link',  # Add reference to lidar frame for sensor fusion
             'enable_sensor_fusion': True,  # Enable fusion with lidar data
@@ -1319,137 +1312,189 @@ def generate_launch_description():
     )
     
     # ==================== LAUNCH DESCRIPTION ====================
+    """
+    Return the complete launch description containing all nodes, parameters, and configurations.
+    
+    The launch sequence is organized in logical groups:
+    1. Core system parameters (time source, visualization)
+    2. Network configuration (TCP connections for sensors)
+    3. Frame structure (TF tree configuration)
+    4. Map parameters (resolution, dimensions, processing)
+    5. TF tree nodes (coordinate frame relationships)
+    6. Sensor processing nodes (LiDAR, radar, IMU)
+    7. Mapping and visualization nodes
+    
+    A 2-second delay is added before starting the nodes to ensure
+    the TF tree is properly established first.
+    """
     return LaunchDescription([
-        # Launch Arguments
-        declare_use_sim_time,
-        declare_show_rviz,
-        declare_lidar_tcp_ip,
+        # ===== CORE SYSTEM PARAMETERS =====
+        # Launch Arguments - Core system configuration
+        declare_use_sim_time,                                             # Controls time source (sim vs. real)
+        declare_show_rviz,                                                # Toggles visualization
+        
+        # ===== NETWORK CONFIGURATION =====
+        # Network Configuration - Sensor data streams
+        declare_lidar_tcp_ip,                                             # LiDAR server connection parameters
         declare_lidar_tcp_port,
-        declare_radar_tcp_ip,
+        declare_radar_tcp_ip,                                             # Radar server connection parameters
         declare_radar_tcp_port,
-        # Add new radar connection arguments
-        declare_radar_reconnect_interval,
+        declare_radar_reconnect_interval,                                 # Connection recovery parameters
         declare_radar_connection_timeout,
-        # Add waypoint connection arguments
-        declare_waypoint_tcp_ip,
+        
+        # ===== WAYPOINT SYSTEM =====
+        # Waypoint System Configuration
+        declare_waypoint_tcp_ip,                                          # Waypoint server connection parameters
         declare_waypoint_tcp_port,
         declare_waypoint_reconnect_interval,
         declare_waypoint_connection_timeout,
-        declare_vehicle_frame_id,
-        declare_map_frame_id,
-        # Add new frame IDs
-        declare_odom_frame_id,
-        declare_local_map_frame_id,
-        declare_map_resolution,
-        declare_map_width,
-        declare_map_height,
-        declare_map_origin_x,
+        
+        # ===== FRAME CONFIGURATION =====
+        # Frame Configuration - TF tree structure
+        declare_vehicle_frame_id,                                         # Vehicle reference frame
+        declare_map_frame_id,                                             # Global map reference frame
+        declare_odom_frame_id,                                            # Odometry reference frame
+        declare_local_map_frame_id,                                       # Local perception map frame
+        
+        # ===== MAP PARAMETERS =====
+        # Map Configuration - Spatial parameters
+        declare_map_resolution,                                           # Grid cell size (meters/cell)
+        declare_map_width,                                                # Map width (meters)
+        declare_map_height,                                               # Map height (meters)
+        declare_map_origin_x,                                             # Map origin position
         declare_map_origin_y,
-        declare_publish_rate,
-        # Add waypoint visualization parameters
-        declare_waypoint_marker_size,
+        declare_publish_rate,                                             # Update frequency (Hz)
+        
+        # ===== WAYPOINT VISUALIZATION =====
+        # Waypoint Visualization
+        declare_waypoint_marker_size,                                     # Marker appearance parameters
         declare_waypoint_line_width,
         declare_waypoint_lifetime,
         declare_waypoint_width,
-        declare_waypoint_binary_topic,
+        declare_waypoint_binary_topic,                                    # Communication topics
         declare_combined_binary_topic,
-        declare_use_local_coordinates,
-        declare_fixed_origin,
-        declare_persistent_markers,
         
-        # Add the rest of the parameters that were missing
-        declare_temporal_filtering,
-        declare_motion_prediction,
-        declare_ground_height_threshold,
-        declare_vegetation_height_ratio,
-        declare_building_width_threshold,
-        declare_dynamic_velocity_threshold,
-        declare_ground_weight,
-        declare_obstacle_weight,
-        declare_vegetation_weight,
-        declare_building_weight,
-        declare_dynamic_weight,
-        declare_enable_3d_visualization,
-        declare_enable_text_labels,
-        declare_vehicle_length,
+        # ===== COORDINATE SYSTEM =====
+        # Coordinate System Configuration
+        declare_use_local_coordinates,                                    # Local vs. global coordinates
+        declare_fixed_origin,                                             # Fixed reference point
+        declare_persistent_markers,                                       # Visualization persistence
+        
+        # ===== PROCESSING PARAMETERS =====
+        # Costmap Processing Parameters
+        declare_temporal_filtering,                                       # Temporal smoothing
+        declare_motion_prediction,                                        # Motion prediction for dynamics
+        declare_ground_height_threshold,                                  # Ground classification threshold
+        declare_vegetation_height_ratio,                                  # Vegetation detection parameter
+        declare_building_width_threshold,                                 # Building classification threshold
+        declare_dynamic_velocity_threshold,                               # Dynamic object detection threshold
+        
+        # ===== LAYER WEIGHTS =====
+        # Layer Weights and Visualization
+        declare_ground_weight,                                            # Ground layer influence
+        declare_obstacle_weight,                                          # Obstacle importance
+        declare_vegetation_weight,                                        # Vegetation detection weight
+        declare_building_weight,                                          # Building detection weight
+        declare_dynamic_weight,                                           # Dynamic object weight
+        declare_enable_3d_visualization,                                  # 3D visualization toggle
+        declare_enable_text_labels,                                       # Label visibility toggle
+        
+        # ===== VEHICLE PARAMETERS =====
+        # Vehicle Parameters
+        declare_vehicle_length,                                           # Vehicle dimensions (meters)
         declare_vehicle_width,
         declare_vehicle_height,
-        declare_enable_tuning,
-        declare_decay_time,
-        declare_dynamic_decay_time,
-        declare_cell_memory,
-        declare_max_tracking_age,
-        declare_marker_lifetime,
-        declare_binary_threshold,
-        declare_enable_binary_output,
-        declare_binary_topic,
-        declare_enable_map_saving,
-        declare_save_directory,
-        declare_save_interval,
-        declare_save_binary_map,
-        declare_save_combined_map,
-        declare_save_layer_maps,
-        declare_occupied_value,
-        declare_free_value,
-        declare_map_format,
-        declare_publish_binary_map,
-        declare_include_all_objects,
-        declare_enhanced_binary_map,
-        declare_all_objects_binary_topic,
-        declare_low_car_height_threshold,
-        declare_car_detection_width,
-        declare_enhance_low_cars,
-        declare_car_expansion_radius,
-        declare_obstacle_expansion_radius,
-        declare_dynamic_expansion_radius,
+        declare_enable_tuning,                                            # Parameter tuning interface toggle
         
-        # Add IMU connection parameters
-        declare_imu_tcp_ip,
+        # ===== TIMING PARAMETERS =====
+        # Time-based Parameters
+        declare_decay_time,                                               # Cell decay time (seconds)
+        declare_dynamic_decay_time,                                       # Dynamic object decay time
+        declare_cell_memory,                                              # Cell persistence time
+        declare_max_tracking_age,                                         # Object tracking time
+        declare_marker_lifetime,                                          # Visualization marker lifetime
+        
+        # ===== BINARY MAP CONFIGURATION =====
+        # Binary Map Configuration
+        declare_binary_threshold,                                         # Classification threshold
+        declare_enable_binary_output,                                     # Binary output toggle
+        declare_binary_topic,                                             # Output topic name
+        
+        # ===== MAP SAVING CONFIGURATION =====
+        # Map Saving Configuration
+        declare_enable_map_saving,                                        # Map saving toggle
+        declare_save_directory,                                           # Save directory path
+        declare_save_interval,                                            # Save frequency (seconds)
+        declare_save_binary_map,                                          # Binary map saving toggle
+        declare_save_combined_map,                                        # Combined map saving toggle
+        declare_save_layer_maps,                                          # Layer map saving toggle
+        declare_occupied_value,                                           # Occupied cell value
+        declare_free_value,                                               # Free cell value
+        declare_map_format,                                               # Output format specification
+        declare_publish_binary_map,                                       # Binary map publishing toggle
+        
+        # ===== ENHANCED DETECTION =====
+        # Enhanced Detection Parameters
+        declare_include_all_objects,                                      # All objects inclusion toggle
+        declare_enhanced_binary_map,                                      # Enhanced map toggle
+        declare_all_objects_binary_topic,                                 # All objects topic name
+        declare_low_car_height_threshold,                                 # Low vehicle detection threshold
+        declare_car_detection_width,                                      # Car width threshold
+        declare_enhance_low_cars,                                         # Low car enhancement toggle
+        declare_car_expansion_radius,                                     # Car expansion radius (cells)
+        declare_obstacle_expansion_radius,                                # Obstacle expansion radius (cells)
+        declare_dynamic_expansion_radius,                                 # Dynamic object expansion radius (cells)
+        
+        # ===== IMU CONFIGURATION =====
+        # IMU Configuration
+        declare_imu_tcp_ip,                                               # IMU connection parameters
         declare_imu_tcp_port,
-        declare_imu_reconnect_interval,
+        declare_imu_reconnect_interval,                                   # Connection recovery parameters
         declare_imu_connection_timeout,
+        declare_imu_frame_id,                                             # IMU frame identifier
         
-        # Add IMU frame parameters
-        declare_imu_frame_id,
+        # ===== UNIFIED MAP CONFIGURATION =====
+        # Unified Map Configuration
+        declare_unified_map_topic,                                        # Unified map topic name
+        declare_unified_map_quality,                                      # Map quality setting (low/medium/high)
+        declare_unified_map_format,                                       # Map file format
+        declare_enhanced_radar_integration,                               # Radar integration toggle
+        declare_enhanced_lidar_integration,                               # LiDAR integration toggle
+        declare_add_timestamp_to_filename,                                # Filename timestamp toggle
+        declare_force_save_on_shutdown,                                   # Shutdown save toggle
         
-        # Add unified map parameters
-        declare_unified_map_topic,
-        declare_unified_map_quality,
-        declare_unified_map_format,
-        declare_enhanced_radar_integration,
-        declare_enhanced_lidar_integration,
-        declare_add_timestamp_to_filename,
-        declare_force_save_on_shutdown,
+        # ===== TF TREE NODES =====
+        # TF Tree Nodes - Transform hierarchy
+        map_to_odom_node,                                                 # Root transform (map→odom)
+        odom_to_base_link_node,                                           # Vehicle odometry (odom→base_link)
+        base_to_imu_node,                                                 # IMU mounting (base_link→imu_link)
+        imu_to_lidar_node,                                                # LiDAR mounting (imu_link→lidar_link)
+        map_to_radar_node,                                                # Radar position (map→radar_link)
+        map_to_local_map_node,                                            # Local map connection (map→local_map_link)
+        local_map_to_waypoint_node,                                       # Waypoint frame (local_map_link→waypoint_frame)
         
-        # TF Tree Nodes - Launch these first to establish the TF tree
-        map_to_odom_node,
-        odom_to_base_link_node,
-        base_to_imu_node,
-        imu_to_lidar_node,
-        map_to_radar_node,
-        map_to_local_map_node,
-        local_map_to_waypoint_node,
-        
-        # Add a timing delay to ensure TF tree is established before other nodes start
+        # ===== NODE INITIALIZATION WITH DELAY =====
+        # Timing Control - Ensure proper initialization
         TimerAction(
-            period=2.0,  # Wait 2 seconds for TF tree to be established
+            period=2.0,                                                   # 2-second initialization delay
             actions=[
-                # IMU-based odometry node
-                imu_odometry_node,
+                # Core System Components
+                imu_odometry_node,                                        # Vehicle motion tracking (EKF)
                 
-                # Sensor Nodes
-                lidar_listener_node,
-                radar_listener_node,
-                semantic_costmap_node,
+                # Sensor Processing Pipeline
+                lidar_listener_node,                                      # LiDAR point cloud processing
+                radar_listener_node,                                      # Radar velocity detection
+                semantic_costmap_node,                                    # Environment semantic mapping
                 
-                # Visualization and Integration Nodes
-                waypoint_listener_node,
-                waypoint_map_generator_node,
-                binary_map_combiner_node,
+                # Navigation and Visualization
+                waypoint_listener_node,                                   # Path planning data receiver
+                waypoint_map_generator_node,                              # Route visualization generator
+                binary_map_combiner_node,                                 # Unified map generation
                 
-                rviz_node,
-                rqt_reconfigure_node,
-                imu_listener_node
+                # User Interface
+                rviz_node,                                                # 3D visualization interface
+                rqt_reconfigure_node,                                     # Dynamic parameter tuning
+                imu_listener_node                                         # IMU data processing and monitoring
             ]
         )
     ]) 
