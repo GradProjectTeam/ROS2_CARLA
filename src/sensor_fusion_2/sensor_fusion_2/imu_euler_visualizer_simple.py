@@ -445,6 +445,8 @@ class ImuEulerVisualizer(Node):
             
         except Exception as e:
             self.get_logger().error(f'{Colors.RED}Error publishing IMU data: {str(e)}{Colors.ENDC}')
+            import traceback
+            self.get_logger().error(traceback.format_exc())
 
     def cleanup(self):
         """Clean up resources when node is destroyed"""
