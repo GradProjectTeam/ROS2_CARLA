@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
 import rclpy
-from sensor_fusion_2.mpc_controller_node import MPCControllerNode
+from sensor_fusion_2.mpc_controller_node import MPCController
 
 def main():
     rclpy.init()
     
-    node = MPCControllerNode()
+    node =  MPCController()
     
     try:
         rclpy.spin(node)

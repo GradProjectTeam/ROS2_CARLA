@@ -110,7 +110,8 @@ def generate_launch_description():
     rviz_config_file = os.path.join(pkg_share, 'rviz', 'semantic_waypoints.rviz')  # Path to RViz configuration
     
     # Set default map save directory with automatic creation
-    default_save_dir = '/home/shishtawy/Documents/ROS2/maps/NewMaps'      # Directory for saving generated maps
+    # default_save_dir = '/home/shishtawy/Documents/ROS2/maps/NewMaps'  
+    default_save_dir = '/home/mostafa/GP/ROS2/maps/NewMaps'    # Directory for saving generated maps
     os.makedirs(default_save_dir, exist_ok=True)                          # Create directory if it doesn't exist
     
     # ==================== DECLARE LAUNCH ARGUMENTS ====================
@@ -410,8 +411,8 @@ def generate_launch_description():
     
     declare_save_directory = DeclareLaunchArgument(
         'save_directory',
-        default_value='/home/shishtawy/Documents/ROS2/maps/NewMaps',
-        # default_value='/home/mostafa/GP/ROS2/maps/NewMaps',
+        # default_value='/home/shishtawy/Documents/ROS2/maps/NewMaps',
+        default_value='/home/mostafa/GP/ROS2/maps/NewMaps',
         description='Directory to save map files'
     )
     

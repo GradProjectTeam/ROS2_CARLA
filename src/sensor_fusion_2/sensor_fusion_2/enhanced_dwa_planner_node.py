@@ -16,6 +16,7 @@ import time
 from queue import Queue, Empty
 from dataclasses import dataclass
 from typing import List, Tuple
+from sklearn.cluster import DBSCAN
 
 import rclpy
 from rclpy.node import Node
@@ -23,11 +24,13 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 from visualization_msgs.msg import MarkerArray, Marker
 from nav_msgs.msg import OccupancyGrid, Path
 from geometry_msgs.msg import Point, PoseStamped, Twist, PoseArray, Pose
-from std_msgs.msg import Header, ColorRGBA, Int32MultiArray, Bool
+from std_msgs.msg import Header, ColorRGBA, Int32MultiArray, Bool, Float32
 from tf2_ros import Buffer, TransformListener
 from builtin_interfaces.msg import Duration
 from tf2_geometry_msgs import do_transform_pose
 from tf2_msgs.msg import TFMessage
+from sensor_msgs.msg import PointCloud2, LaserScan
+
 
 # Fix the exceptions import
 # In ROS2, these exceptions are directly in tf2_ros
@@ -120,56 +123,84 @@ class EnhancedDWAPlanner(Node):
         self.declare_parameter('waypoints_topic', '/carla/waypoints')
         self.declare_parameter('waypoint_markers_topic', '/carla/waypoint_markers')
         self.declare_parameter('binary_map_topic', '/combined_binary_map')
-        self.declare_parameter('path_topic', '/dwa/planned_path')
+        self.declare_parameter('path_topic', '/dwa/path')
         self.declare_parameter('cmd_vel_topic', '/dwa/cmd_vel')
-        self.declare_parameter('parking_spots_topic', '/dwa/parking_spots')
-        self.declare_parameter('publish_rate', 10.0)  # Hz
-        self.declare_parameter('max_speed', 30.0)
-        self.declare_parameter('min_speed', -4.0)
-        self.declare_parameter('max_yaw_rate', 1.5)
-        self.declare_parameter('max_accel', 8.0)
-        self.declare_parameter('max_delta_yaw_rate', 0.8)
-        self.declare_parameter('dt', 0.2)
-        self.declare_parameter('predict_time', 2.0)
-        self.declare_parameter('to_goal_cost_gain', 1.0)
-        self.declare_parameter('speed_cost_gain', 0.3)
-        self.declare_parameter('obstacle_cost_gain', 10.0)
-        self.declare_parameter('path_following_gain', 0.002)
-        self.declare_parameter('lookahead_distance', 3.0)
-        self.declare_parameter('obstacle_threshold', 100)
-        self.declare_parameter('safe_distance', 2.0)
-        self.declare_parameter('default_lane_width', 3.5)
-        self.declare_parameter('lane_width_factor', 0.8)
-        self.declare_parameter('min_parking_width', 2.5)
-        self.declare_parameter('min_parking_length', 5.0)
-        self.declare_parameter('enable_parking_detection', True)
-        self.declare_parameter('extended_predict_time', 8.0)  # Longer prediction time for visualization
-        self.declare_parameter('parking_gray_threshold', 0.4)  # Threshold for gray lane detection
-        self.declare_parameter('parking_visualization_lifetime', 5.0)  # Lifetime for parking spot visualization
-        self.declare_parameter('prevent_unnecessary_stops', True)  # New parameter to control stopping behavior
-        self.declare_parameter('min_continuous_speed', 5.0)  # Minimum speed to maintain when not stopping
-        self.declare_parameter('use_lane_based_obstacles', True)
-        self.declare_parameter('ignore_obstacles_outside_lane', True)
-        self.declare_parameter('strict_lane_obstacle_detection', True)
-        self.declare_parameter('obstacle_influence_radius', 1.5)
-        self.declare_parameter('obstacle_detection_range', 20.0)
-        self.declare_parameter('debug_obstacle_detection', True)
-        self.declare_parameter('stop_for_lane_obstacles', True)
-        self.declare_parameter('min_obstacle_count', 2)
-        self.declare_parameter('obstacle_detection_threshold', 0.1)
-        self.declare_parameter('start_point_offset', 0.8)  # Offset for the start point of the path
-        self.declare_parameter('min_obstacle_distance', 2.5)  # Minimum distance to obstacles
-        self.declare_parameter('path_smoothing_factor', 0.7)  # Factor for path smoothing
-        self.declare_parameter('lateral_safety_margin', 0.5)  # Lateral safety margin
-        self.declare_parameter('obstacle_weight_decay', 0.8)  # Weight decay for obstacles with distance
-        self.declare_parameter('dynamic_obstacle_prediction', True)  # Enable dynamic obstacle prediction
-        self.declare_parameter('adaptive_lookahead', True)  # Enable adaptive lookahead distance
+        self.declare_parameter('obstacle_detected_topic', '/dwa/obstacle_detected')
+        self.declare_parameter('publish_rate', 20.0)  # Hz - Updated to match unified_rate
+        self.declare_parameter('max_speed', 30.0)  # Reduced from 50.0 to 30.0 to better match MPC's max speed
+        self.declare_parameter('min_speed', 0.0)
+        self.declare_parameter('max_yaw_rate', 0.5)  # Increased for better heading control
+        self.declare_parameter('max_accel', 8.0)  # Increased for faster acceleration
+        self.declare_parameter('max_delta_yaw_rate', 0.3)  # Increased for more responsive heading changes
+        self.declare_parameter('dt', 0.1)
+        self.declare_parameter('predict_time', 2.5)  # Reduced for more frequent heading updates
+        self.declare_parameter('to_goal_cost_gain', 1.5)  # Adjusted for better balance
+        self.declare_parameter('speed_cost_gain', 0.2)  # Reduced to prioritize obstacle avoidance
+        self.declare_parameter('obstacle_cost_gain', 25.0)  # Further increased for stronger obstacle avoidance
+        self.declare_parameter('path_following_gain', 15.0)  # Adjusted for better path following
+        self.declare_parameter('lookahead_distance', 10.0)  # Reduced for tighter heading control
+        self.declare_parameter('obstacle_threshold', 30)  # Significantly lowered threshold for black obstacle detection
+        self.declare_parameter('safe_distance', 6.0)  # Increased safety margin
+        self.declare_parameter('default_lane_width', 3.2)
+        self.declare_parameter('lane_width_factor', 0.9)  # Increased for wider lane consideration
+        self.declare_parameter('start_point_offset', 0.3)  # Reduced to start turns earlier
+        self.declare_parameter('min_obstacle_distance', 2.0)  # Increased minimum distance to obstacles
+        self.declare_parameter('path_smoothing_factor', 0.5)  # Reduced for more precise path following
+        self.declare_parameter('lateral_safety_margin', 1.8)  # Increased lateral safety margin
+        self.declare_parameter('obstacle_weight_decay', 0.1)  # Adjusted decay for stronger close-range avoidance
+        self.declare_parameter('adaptive_lookahead', True)
         
         # New parameters for enhanced obstacle avoidance
         self.declare_parameter('emergency_stop_enabled', True)
-        self.declare_parameter('emergency_brake_distance', 8.0)
+        self.declare_parameter('emergency_brake_distance', 8.0)  # Increased emergency brake distance
         self.declare_parameter('obstacle_path_pruning', True)
-        self.declare_parameter('obstacle_velocity_factor', 1.5)
+        self.declare_parameter('debug_level', 'debug')  # Force debug level for this node
+        
+        # Additional parameters from launch file
+        self.declare_parameter('verbose_logging', True)  # Enable verbose logging
+        self.declare_parameter('log_map_processing', True)  # Log details about map processing
+        self.declare_parameter('log_obstacle_detection', True)  # Log details about obstacle detection
+        self.declare_parameter('log_path_planning', True)  # Log details about path planning
+        self.declare_parameter('publish_debug_images', True)  # Publish debug images
+        self.declare_parameter('publish_debug_markers', True)  # Publish debug markers
+        self.declare_parameter('diagnostic_level', 2)  # Maximum diagnostic level
+        
+        # Enhanced parameters for black obstacles on gray lanes
+        self.declare_parameter('lane_obstacle_detection_enabled', True)  # Enable specific detection of obstacles crossing lanes
+        self.declare_parameter('lane_obstacle_threshold', 30)  # Lower threshold for detecting black obstacles (black is close to 0)
+        self.declare_parameter('lane_gray_min_threshold', 100)  # Minimum gray value to be considered a lane
+        self.declare_parameter('lane_gray_max_threshold', 200)  # Maximum gray value to be considered a lane
+        self.declare_parameter('lane_width_for_obstacles', 4.0)  # Width of lane to check for obstacles (meters)
+        self.declare_parameter('lane_obstacle_min_area', 30)  # Minimum area of obstacle pixels to consider
+        self.declare_parameter('lane_obstacle_stop_distance', 10.0)  # Distance to start stopping when lane obstacle detected
+        self.declare_parameter('lane_obstacle_slow_distance', 15.0)  # Distance to start slowing down when lane obstacle detected
+        
+        # Black lane detection parameters
+        self.declare_parameter('black_lane_detection_enabled', True)  # Enable black lane detection
+        self.declare_parameter('black_lane_threshold', 0)  # Lower threshold for detecting black lanes (0-255)
+        self.declare_parameter('black_lane_min_area', 10)  # Minimum area of black pixels to consider as a lane
+        self.declare_parameter('black_lane_stop_distance', 20.0)  # Distance to start stopping when black lane detected
+        self.declare_parameter('black_lane_slow_distance', 30.0)  # Distance to start slowing down when black lane detected
+        self.declare_parameter('min_cmd_vel_for_stop', 0.3)  # Lower velocity to send when stopping (for more immediate stops)
+        
+        # Waypoint crossing obstacle parameters
+        self.declare_parameter('waypoint_obstacle_check_enabled', True)  # Enable checking if obstacles cross waypoints
+        self.declare_parameter('waypoint_corridor_width', 3.5)  # Width of corridor around waypoints to check for obstacles
+        self.declare_parameter('waypoint_obstacle_lookahead', 20.0)  # How far ahead to check waypoints for obstacles
+        self.declare_parameter('waypoint_obstacle_threshold', 30)  # Lower threshold for detecting black obstacles on waypoint path
+        self.declare_parameter('waypoint_obstacle_stop_command', True)  # Send stop command when obstacle crosses waypoints
+        
+        # Color-specific detection
+        self.declare_parameter('color_detection_enabled', True)  # Enable color-specific detection
+        self.declare_parameter('black_obstacle_max_value', 50)  # Maximum pixel value to be considered black (obstacles)
+        self.declare_parameter('gray_lane_min_value', 100)  # Minimum pixel value to be considered gray (lanes)
+        self.declare_parameter('gray_lane_max_value', 200)  # Maximum pixel value to be considered gray (lanes)
+        self.declare_parameter('contrast_enhancement_enabled', True)  # Enable contrast enhancement for better detection
+        
+        # Map subscription parameters
+        self.declare_parameter('map_subscription_qos', 'reliable_transient')  # Use reliable and transient local QoS for map subscription
+        self.declare_parameter('map_subscription_timeout', 60.0)  # Wait up to 60 seconds for map data
+        self.declare_parameter('map_subscription_retry_interval', 2.0)  # Retry every 2 seconds
         
         # Get parameters
         self.map_frame_id = self.get_parameter('map_frame_id').get_parameter_value().string_value
@@ -179,96 +210,178 @@ class EnhancedDWAPlanner(Node):
         self.binary_map_topic = self.get_parameter('binary_map_topic').get_parameter_value().string_value
         self.path_topic = self.get_parameter('path_topic').get_parameter_value().string_value
         self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').get_parameter_value().string_value
-        self.parking_spots_topic = self.get_parameter('parking_spots_topic').get_parameter_value().string_value
+        self.obstacle_detected_topic = self.get_parameter('obstacle_detected_topic').get_parameter_value().string_value
         self.publish_rate = self.get_parameter('publish_rate').get_parameter_value().double_value
         
         # DWA parameters
         self.max_speed = self.get_parameter('max_speed').get_parameter_value().double_value
-        self.min_speed = 0.0  # Set minimum speed to 0.0 to prevent backward motion
+        self.min_speed = self.get_parameter('min_speed').get_parameter_value().double_value
         self.max_yaw_rate = self.get_parameter('max_yaw_rate').get_parameter_value().double_value
-        self.max_accel = 8.0  # Set to match reference implementation
-        self.max_delta_yaw_rate = 0.8  # Set to match reference implementation
-        self.dt = 0.2  # Set to match reference implementation
-        self.predict_time = 2.0  # Set to match reference implementation
-        self.to_goal_cost_gain = 1.0  # Set to match reference implementation
-        self.speed_cost_gain = 0.3  # Set to match reference implementation
-        self.obstacle_cost_gain = 10.0  # Set to match reference implementation
-        self.path_following_gain = 0.002  # Set to match reference implementation
-        self.lookahead_distance = 3.0  # Set to match reference implementation
-        self.obstacle_threshold = 0.7  # Set to match reference implementation (as a normalized value)
-        self.safe_distance = 2.0  # Set to match reference implementation
+        self.max_accel = self.get_parameter('max_accel').get_parameter_value().double_value
+        self.max_delta_yaw_rate = self.get_parameter('max_delta_yaw_rate').get_parameter_value().double_value
+        self.dt = self.get_parameter('dt').get_parameter_value().double_value
+        self.predict_time = self.get_parameter('predict_time').get_parameter_value().double_value
+        self.to_goal_cost_gain = self.get_parameter('to_goal_cost_gain').get_parameter_value().double_value
+        self.speed_cost_gain = self.get_parameter('speed_cost_gain').get_parameter_value().double_value
+        self.obstacle_cost_gain = self.get_parameter('obstacle_cost_gain').get_parameter_value().double_value
+        self.path_following_gain = self.get_parameter('path_following_gain').get_parameter_value().double_value
+        self.lookahead_distance = self.get_parameter('lookahead_distance').get_parameter_value().double_value
+        self.obstacle_threshold = self.get_parameter('obstacle_threshold').get_parameter_value().integer_value
+        self.safe_distance = self.get_parameter('safe_distance').get_parameter_value().double_value
         self.default_lane_width = self.get_parameter('default_lane_width').get_parameter_value().double_value
         self.lane_width_factor = self.get_parameter('lane_width_factor').get_parameter_value().double_value
-        self.min_parking_width = self.get_parameter('min_parking_width').get_parameter_value().double_value
-        self.min_parking_length = self.get_parameter('min_parking_length').get_parameter_value().double_value
-        self.enable_parking_detection = self.get_parameter('enable_parking_detection').get_parameter_value().bool_value
-        self.extended_predict_time = self.get_parameter('extended_predict_time').get_parameter_value().double_value
-        self.parking_gray_threshold = self.get_parameter('parking_gray_threshold').get_parameter_value().double_value
-        self.parking_visualization_lifetime = self.get_parameter('parking_visualization_lifetime').get_parameter_value().double_value
-        self.prevent_unnecessary_stops = self.get_parameter('prevent_unnecessary_stops').get_parameter_value().bool_value
-        self.min_continuous_speed = self.get_parameter('min_continuous_speed').get_parameter_value().double_value
-        self.use_lane_based_obstacles = self.get_parameter('use_lane_based_obstacles').get_parameter_value().bool_value
-        self.ignore_obstacles_outside_lane = self.get_parameter('ignore_obstacles_outside_lane').get_parameter_value().bool_value
-        self.strict_lane_obstacle_detection = self.get_parameter('strict_lane_obstacle_detection').get_parameter_value().bool_value
-        self.obstacle_influence_radius = self.get_parameter('obstacle_influence_radius').get_parameter_value().double_value
-        self.obstacle_detection_range = self.get_parameter('obstacle_detection_range').get_parameter_value().double_value
-        self.debug_obstacle_detection = self.get_parameter('debug_obstacle_detection').get_parameter_value().bool_value
-        self.stop_for_lane_obstacles = self.get_parameter('stop_for_lane_obstacles').get_parameter_value().bool_value
-        self.min_obstacle_count = self.get_parameter('min_obstacle_count').get_parameter_value().integer_value
-        self.obstacle_detection_threshold = self.get_parameter('obstacle_detection_threshold').get_parameter_value().double_value
         self.start_point_offset = self.get_parameter('start_point_offset').get_parameter_value().double_value
         self.min_obstacle_distance = self.get_parameter('min_obstacle_distance').get_parameter_value().double_value
         self.path_smoothing_factor = self.get_parameter('path_smoothing_factor').get_parameter_value().double_value
         self.lateral_safety_margin = self.get_parameter('lateral_safety_margin').get_parameter_value().double_value
         self.obstacle_weight_decay = self.get_parameter('obstacle_weight_decay').get_parameter_value().double_value
-        self.dynamic_obstacle_prediction = self.get_parameter('dynamic_obstacle_prediction').get_parameter_value().bool_value
         self.adaptive_lookahead = self.get_parameter('adaptive_lookahead').get_parameter_value().bool_value
         
         # Get new parameters for enhanced obstacle avoidance
         self.emergency_stop_enabled = self.get_parameter('emergency_stop_enabled').get_parameter_value().bool_value
         self.emergency_brake_distance = self.get_parameter('emergency_brake_distance').get_parameter_value().double_value
         self.obstacle_path_pruning = self.get_parameter('obstacle_path_pruning').get_parameter_value().bool_value
-        self.obstacle_velocity_factor = self.get_parameter('obstacle_velocity_factor').get_parameter_value().double_value
+        self.debug_level = self.get_parameter('debug_level').get_parameter_value().string_value
         
-        # Set up QoS profiles
-        qos_profile = QoSProfile(
+        # Get additional parameters from launch file
+        self.verbose_logging = self.get_parameter('verbose_logging').get_parameter_value().bool_value
+        self.log_map_processing = self.get_parameter('log_map_processing').get_parameter_value().bool_value
+        self.log_obstacle_detection = self.get_parameter('log_obstacle_detection').get_parameter_value().bool_value
+        self.log_path_planning = self.get_parameter('log_path_planning').get_parameter_value().bool_value
+        self.publish_debug_images = self.get_parameter('publish_debug_images').get_parameter_value().bool_value
+        self.publish_debug_markers = self.get_parameter('publish_debug_markers').get_parameter_value().bool_value
+        self.diagnostic_level = self.get_parameter('diagnostic_level').get_parameter_value().integer_value
+        
+        # Get enhanced parameters for black obstacles on gray lanes
+        self.lane_obstacle_detection_enabled = self.get_parameter('lane_obstacle_detection_enabled').get_parameter_value().bool_value
+        self.lane_obstacle_threshold = self.get_parameter('lane_obstacle_threshold').get_parameter_value().integer_value
+        self.lane_gray_min_threshold = self.get_parameter('lane_gray_min_threshold').get_parameter_value().integer_value
+        self.lane_gray_max_threshold = self.get_parameter('lane_gray_max_threshold').get_parameter_value().integer_value
+        self.lane_width_for_obstacles = self.get_parameter('lane_width_for_obstacles').get_parameter_value().double_value
+        self.lane_obstacle_min_area = self.get_parameter('lane_obstacle_min_area').get_parameter_value().integer_value
+        self.lane_obstacle_stop_distance = self.get_parameter('lane_obstacle_stop_distance').get_parameter_value().double_value
+        self.lane_obstacle_slow_distance = self.get_parameter('lane_obstacle_slow_distance').get_parameter_value().double_value
+        
+        # Get black lane detection parameters
+        self.black_lane_detection_enabled = self.get_parameter('black_lane_detection_enabled').get_parameter_value().bool_value
+        self.black_lane_threshold = self.get_parameter('black_lane_threshold').get_parameter_value().integer_value
+        self.black_lane_min_area = self.get_parameter('black_lane_min_area').get_parameter_value().integer_value
+        self.black_lane_stop_distance = self.get_parameter('black_lane_stop_distance').get_parameter_value().double_value
+        self.black_lane_slow_distance = self.get_parameter('black_lane_slow_distance').get_parameter_value().double_value
+        self.min_cmd_vel_for_stop = self.get_parameter('min_cmd_vel_for_stop').get_parameter_value().double_value
+        
+        # Get waypoint crossing obstacle parameters
+        self.waypoint_obstacle_check_enabled = self.get_parameter('waypoint_obstacle_check_enabled').get_parameter_value().bool_value
+        self.waypoint_corridor_width = self.get_parameter('waypoint_corridor_width').get_parameter_value().double_value
+        self.waypoint_obstacle_lookahead = self.get_parameter('waypoint_obstacle_lookahead').get_parameter_value().double_value
+        self.waypoint_obstacle_threshold = self.get_parameter('waypoint_obstacle_threshold').get_parameter_value().integer_value
+        self.waypoint_obstacle_stop_command = self.get_parameter('waypoint_obstacle_stop_command').get_parameter_value().bool_value
+        
+        # Get color-specific detection parameters
+        self.color_detection_enabled = self.get_parameter('color_detection_enabled').get_parameter_value().bool_value
+        self.black_obstacle_max_value = self.get_parameter('black_obstacle_max_value').get_parameter_value().integer_value
+        self.gray_lane_min_value = self.get_parameter('gray_lane_min_value').get_parameter_value().integer_value
+        self.gray_lane_max_value = self.get_parameter('gray_lane_max_value').get_parameter_value().integer_value
+        self.contrast_enhancement_enabled = self.get_parameter('contrast_enhancement_enabled').get_parameter_value().bool_value
+        
+        # Get map subscription parameters
+        self.map_subscription_qos = self.get_parameter('map_subscription_qos').get_parameter_value().string_value
+        self.map_subscription_timeout = self.get_parameter('map_subscription_timeout').get_parameter_value().double_value
+        self.map_subscription_retry_interval = self.get_parameter('map_subscription_retry_interval').get_parameter_value().double_value
+        
+        # For obstacle detection
+        self.min_obstacle_count = 1  # Minimum number of obstacle points to trigger a stop
+        self.obstacle_inflation_radius = 2  # Radius to inflate obstacles for collision checking
+        
+        # Set logging level
+        if self.debug_level == 'debug':
+            rclpy.logging.set_logger_level(self.get_logger().name, rclpy.logging.LoggingSeverity.DEBUG)
+        elif self.debug_level == 'info':
+            rclpy.logging.set_logger_level(self.get_logger().name, rclpy.logging.LoggingSeverity.INFO)
+        elif self.debug_level == 'warn':
+            rclpy.logging.set_logger_level(self.get_logger().name, rclpy.logging.LoggingSeverity.WARN)
+        elif self.debug_level == 'error':
+            rclpy.logging.set_logger_level(self.get_logger().name, rclpy.logging.LoggingSeverity.ERROR)
+        
+        # Initialize sensor-based obstacle data
+        self.lane_obstacle_positions = []  # Initialize empty list for lane obstacle positions
+        self.detected_obstacles = []  # Initialize empty list for detected obstacles
+        self.obstacle_memory_time = 2.0  # How long to remember obstacles (seconds)
+        self.last_obstacle_time = self.get_clock().now()  # Time of last obstacle detection
+        
+        # Create different QoS profiles for different types of communications
+        
+        # For map data - use transient local for late joining and reliable communication
+        map_qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
             history=HistoryPolicy.KEEP_LAST,
             depth=10
+        )
+            
+        # For waypoints - use the same QoS profile as the waypoint_listener node
+        waypoints_qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,  # Changed from TRANSIENT_LOCAL to VOLATILE to match waypoint_listener
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+        
+        # For control commands - use reliable but not transient local (best effort might be better for real-time)
+        control_qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1  # Only need the latest command
+        )
+        
+        # For visualization - can use best effort for better performance
+        viz_qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1  # Only need the latest visualization
         )
         
         # Create publishers
         self.path_publisher = self.create_publisher(
             Path,
             self.path_topic,
-            qos_profile
+            control_qos_profile  # Path is used for control, so use control QoS
         )
         
         self.cmd_vel_publisher = self.create_publisher(
             Twist,
             self.cmd_vel_topic,
-            qos_profile
+            control_qos_profile  # Critical control commands
         )
         
         # Create visualization marker publisher
         self.marker_publisher = self.create_publisher(
             MarkerArray,
             self.path_topic + '_markers',
-            qos_profile
+            viz_qos_profile  # Visualization can use best effort
         )
         
-        # Create parking spots marker publisher
-        self.parking_spots_publisher = self.create_publisher(
-            MarkerArray,
-            self.parking_spots_topic,
-            qos_profile
-        )
-        
-        # Create obstacle detection publisher
+        # Create obstacle detection publisher - this is safety critical so use reliable
         self.obstacle_detected_publisher = self.create_publisher(
             Bool,
-            '/dwa/obstacle_detected',
-            qos_profile
+            self.obstacle_detected_topic,
+            control_qos_profile  # Safety critical, use reliable
+        )
+        
+        # Create parking spots visualization publisher
+        self.parking_spots_publisher = self.create_publisher(
+            MarkerArray,
+            self.path_topic + '_parking_spots',
+            viz_qos_profile  # Visualization can use best effort
+        )
+        
+        # Create obstacle visualization publisher
+        self.obstacle_viz_pub = self.create_publisher(
+            MarkerArray,
+            self.path_topic + '_obstacles',
+            viz_qos_profile  # Visualization can use best effort
         )
         
         # Create subscribers
@@ -276,14 +389,14 @@ class EnhancedDWAPlanner(Node):
             OccupancyGrid,
             self.binary_map_topic,
             self.map_callback,
-            qos_profile
+            map_qos_profile  # Map data needs transient local
         )
         
         self.waypoints_subscriber = self.create_subscription(
             PoseArray,
             self.waypoints_topic,
             self.waypoints_callback,
-            qos_profile
+            waypoints_qos_profile  # Waypoints need transient local
         )
         
         # Also subscribe to waypoint metadata to get lane information
@@ -291,14 +404,14 @@ class EnhancedDWAPlanner(Node):
             Int32MultiArray,
             self.waypoints_topic + "_metadata",
             self.metadata_callback,
-            qos_profile
+            waypoints_qos_profile  # Metadata should match waypoints QoS
         )
         
         self.marker_subscriber = self.create_subscription(
             MarkerArray,
             self.waypoint_markers_topic,
             self.markers_callback,
-            qos_profile
+            viz_qos_profile  # Markers are visualization, can use best effort
         )
         
         # Set up TF listener
@@ -316,7 +429,10 @@ class EnhancedDWAPlanner(Node):
         self.waypoints = []
         self.lane_widths = []  # Store lane widths for each waypoint
         self.current_lane_width = self.default_lane_width
-        self.parking_spots = []
+        
+        # Define lane threshold values for obstacle cost calculation
+        self.lane_threshold_min = self.lane_gray_min_threshold if hasattr(self, 'lane_gray_min_threshold') else 40
+        self.lane_threshold_max = self.lane_gray_max_threshold if hasattr(self, 'lane_gray_max_threshold') else 60
         
         # State variables
         self.current_x = 0.0
@@ -324,7 +440,8 @@ class EnhancedDWAPlanner(Node):
         self.current_theta = 0.0
         self.current_v = 2.0  # Initialize with a higher positive velocity for better start
         self.current_omega = 0.0
-        self.lane_obstacle_positions = []  # Initialize empty list for lane obstacle positions
+        self.current_pose = [0.0, 0.0, 0.0]  # [x, y, theta]
+        self.current_goal = None  # Will be set based on target waypoint
         
         # Planner state tracking
         self.planner_state = "READY"  # Start in READY state instead of INITIALIZING
@@ -340,19 +457,29 @@ class EnhancedDWAPlanner(Node):
         # Create timer for planning and control
         self.timer = self.create_timer(1.0 / self.publish_rate, self.planning_callback)
         
-        # Create timer for parking spot detection (at a slower rate)
-        if self.enable_parking_detection:
-            self.parking_timer = self.create_timer(2.0, self.detect_parking_spots)
-        
         # Status variables
         self.has_map = False
         self.has_waypoints = False
         self.last_plan_time = self.get_clock().now()
         
+        # Add velocity feedback
+        self.current_velocity = 0.0  # m/s
+        self.velocity_sub = self.create_subscription(
+            Float32,  # Velocity comes as Float32
+            '/carla/ego_vehicle/velocity',  # Topic published by velocity_listener
+            self.velocity_callback,
+            10
+        )
+        
         self.get_logger().info("Enhanced DWA Planner node initialized")
     
-    def map_callback(self, msg):
-        """Process incoming binary map"""
+    def velocity_callback(self, msg):
+        """Handle velocity feedback"""
+        self.current_velocity = msg.data  # m/s
+        self.get_logger().debug(f"Received velocity: {self.current_velocity} m/s")
+        
+    def map_callback(self, msg: OccupancyGrid):
+        """Process incoming binary map that combines obstacles (black) and waypoint lanes (grey)"""
         try:
             with self.map_lock:
                 # Extract map data
@@ -362,14 +489,44 @@ class EnhancedDWAPlanner(Node):
                 self.map_origin_x = msg.info.origin.position.x
                 self.map_origin_y = msg.info.origin.position.y
                 
-                # Convert from 1D array to 2D numpy array
-                self.cost_map = np.array(msg.data).reshape((self.map_height, self.map_width)) / 100.0
-                self.binary_map = msg  # Store the original binary map message
+                # Store the raw binary map data
+                self.binary_map = msg  # Store the entire OccupancyGrid message
+                
+                # Convert from 1D array to 2D numpy array (0-100 scale)
+                self.cost_map = np.array(msg.data).reshape((self.map_height, self.map_width))
+                
+                # Create separate maps for obstacles and lanes
+                # Obstacles (black) are represented by values close to 0 (in binary map)
+                # The threshold is defined by obstacle_threshold parameter (default 30)
+                self.obstacle_map = (self.cost_map < self.obstacle_threshold).astype(np.float32)
+                
+                # Lanes (grey) are represented by values around 50
+                if hasattr(self, 'lane_gray_min_threshold') and hasattr(self, 'lane_gray_max_threshold'):
+                    self.lane_map = ((self.cost_map >= self.lane_gray_min_threshold) & 
+                                    (self.cost_map <= self.lane_gray_max_threshold)).astype(np.float32)
+                    # Update lane thresholds for obstacle cost calculation
+                    self.lane_threshold_min = self.lane_gray_min_threshold
+                    self.lane_threshold_max = self.lane_gray_max_threshold
+                else:
+                    # Default range if specific thresholds aren't available
+                    self.lane_map = ((self.cost_map >= 40) & (self.cost_map <= 60)).astype(np.float32)
+                    # Update lane thresholds with default values
+                    self.lane_threshold_min = 40
+                    self.lane_threshold_max = 60
+                
+                # Store map data for obstacle detection algorithms
+                self.map_data = self.cost_map
+                
                 self.has_map = True
                 
-                self.get_logger().debug(f"Received map {self.map_width}x{self.map_height} with resolution {self.map_resolution}")
+                if self.verbose_logging:
+                    self.get_logger().info(f"Received binary map {self.map_width}x{self.map_height} with resolution {self.map_resolution}")
+                else:
+                    self.get_logger().debug(f"Received binary map {self.map_width}x{self.map_height} with resolution {self.map_resolution}")
         except Exception as e:
             self.get_logger().error(f"Error processing map: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
     
     def waypoints_callback(self, msg):
         """Process incoming waypoints"""
@@ -457,6 +614,9 @@ class EnhancedDWAPlanner(Node):
                 cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
                 self.current_theta = math.atan2(siny_cosp, cosy_cosp)
                 
+                # Update current_pose
+                self.current_pose = [self.current_x, self.current_y, self.current_theta]
+                
                 # Note: velocity would ideally come from odometry
                 # For now, we'll keep the existing velocity
                 
@@ -465,154 +625,13 @@ class EnhancedDWAPlanner(Node):
             self.get_logger().warn(f"Could not update vehicle state: {e}")
             return False
     
-    def detect_parking_spots(self):
-        """Detect potential parking spots in the environment"""
-        if not self.has_map:
-            return
-        
-        try:
-            with self.map_lock:
-                if self.cost_map is None:
-                    return
-                
-                # Get current vehicle position
-                with self.state_lock:
-                    vehicle_pos = (self.current_x, self.current_y)
-                
-                # Convert from map coordinates to grid coordinates
-                grid_x = int((vehicle_pos[0] - self.map_origin_x) / self.map_resolution)
-                grid_y = int((vehicle_pos[1] - self.map_origin_y) / self.map_resolution)
-                vehicle_grid_pos = (grid_x, grid_y)
-                
-                # Find parking spots
-                parking_spots = self._find_safe_parking_spots(vehicle_grid_pos)
-                
-                if parking_spots:
-                    self.parking_spots = parking_spots
-                    self.publish_parking_spots()
-                    self.get_logger().info(f"Found {len(parking_spots)} potential parking spots")
-        except Exception as e:
-            self.get_logger().error(f"Error detecting parking spots: {e}")
-    
-    def _find_safe_parking_spots(self, vehicle_pos):
-        """Find safe parking spots in the environment using the binary map"""
-        if self.cost_map is None:
-            return []
-        
-        import cv2
-        
-        # Create a mask for potential parking areas
-        # We're looking for areas that are not completely occupied (black) but also not completely free (white)
-        # These gray areas often represent lane markings or areas suitable for parking
-        parking_mask = ((self.cost_map > 0.1) & (self.cost_map < self.parking_gray_threshold)).astype(np.uint8)
-        
-        # Apply some morphological operations to clean up the mask
-        kernel = np.ones((3, 3), np.uint8)
-        parking_mask = cv2.morphologyEx(parking_mask, cv2.MORPH_CLOSE, kernel)
-        
-        # Find edges in the parking mask
-        edges = cv2.Canny((parking_mask * 255).astype(np.uint8), 50, 150)
-        
-        # Find points that are both in the parking mask and on edges
-        edge_points = np.argwhere((parking_mask == 1) & (edges > 0))
-        
-        # Filter points to be within a reasonable distance from the vehicle
-        max_search_distance = 40  # meters
-        max_grid_distance = int(max_search_distance / self.map_resolution)
-        
-        parking_spots = []
-        for y, x in edge_points:  # Note: OpenCV uses (y, x) indexing
-            # Check if point is within search distance
-            if abs(x - vehicle_pos[0]) > max_grid_distance or abs(y - vehicle_pos[1]) > max_grid_distance:
-                continue
-                
-            if self._check_parking_space_on_lane(y, x):
-                angle = self._calculate_parking_angle(y, x)
-                if self._is_safe_distance(y, x):
-                    # Convert grid coordinates back to map coordinates
-                    map_x = x * self.map_resolution + self.map_origin_x
-                    map_y = y * self.map_resolution + self.map_origin_y
-                    
-                    parking_spots.append(ParkingSpot(
-                        x=map_x,
-                        y=map_y,
-                        width=self.min_parking_width,
-                        length=self.min_parking_length,
-                        angle=angle
-                    ))
-        
-        # Filter out duplicate spots that are too close to each other
-        filtered_spots = []
-        min_spot_distance = max(self.min_parking_width, self.min_parking_length) * 0.8
-        
-        for spot in parking_spots:
-            # Check if this spot is far enough from all existing filtered spots
-            is_unique = True
-            for existing_spot in filtered_spots:
-                dist = math.hypot(spot.x - existing_spot.x, spot.y - existing_spot.y)
-                if dist < min_spot_distance:
-                    is_unique = False
-                    break
-            
-            if is_unique:
-                filtered_spots.append(spot)
-        
-        self.get_logger().debug(f"Found {len(filtered_spots)} parking spots after filtering")
-        return filtered_spots
-    
-    def _check_parking_space_on_lane(self, y, x):
-        """Check if an area is suitable for parking on a gray lane"""
-        if self.cost_map is None:
-            return False
-        
-        for angle in [0, np.pi/2]:
-            width = int(self.min_parking_width / self.map_resolution * np.cos(angle) + 
-                        self.min_parking_length / self.map_resolution * np.sin(angle))
-            length = int(self.min_parking_width / self.map_resolution * np.sin(angle) + 
-                         self.min_parking_length / self.map_resolution * np.cos(angle))
-            
-            y1, x1 = max(0, y - width//2), max(0, x - length//2)
-            y2, x2 = min(self.cost_map.shape[0], y + width//2), min(self.cost_map.shape[1], x + length//2)
-            
-            area = self.cost_map[y1:y2, x1:x2]
-            
-            # Check if the area is suitable for parking:
-            # - Most of the area should be gray lane (between 0.1 and parking_gray_threshold)
-            if area.size > 0:
-                gray_pixels = np.sum((area > 0.1) & (area < self.parking_gray_threshold))
-                gray_ratio = gray_pixels / area.size
-                
-                # At least 70% of the area should be gray lane
-                if gray_ratio > 0.7:
-                    return True
-        
-        return False
-    
-    def _calculate_parking_angle(self, y, x):
-        """Calculate the orientation angle for a parking spot"""
-        import cv2
-        
-        edges = cv2.Canny((self.cost_map * 255).astype(np.uint8), 50, 150)
-        if edges[y, x] > 0:
-            grad_y = cv2.Sobel(edges, cv2.CV_64F, 1, 0, ksize=3)
-            grad_x = cv2.Sobel(edges, cv2.CV_64F, 0, 1, ksize=3)
-            angle = np.arctan2(grad_y[y, x], grad_x[y, x])
-            return angle + np.pi/2
-        return 0.0
-    
-    def _is_safe_distance(self, y, x):
-        """Check if a location has safe distance from obstacles"""
-        if self.cost_map is None:
-            return False
-        
-        window_size = int(self.safe_distance / self.map_resolution)
-        y1, x1 = max(0, y - window_size), max(0, x - window_size)
-        y2, x2 = min(self.cost_map.shape[0], y + window_size), min(self.cost_map.shape[1], x + window_size)
-        area = self.cost_map[y1:y2, x1:x2]
-        return np.mean(area) < 0.3
-    
     def find_obstacles_on_path(self, path_points, binary_map, vehicle_pose):
         """Find obstacles on the planned path."""
+        # Check if binary_map is None
+        if binary_map is None:
+            self.get_logger().warn("Binary map is None, cannot detect obstacles")
+            return False
+            
         # Extract vehicle position
         x = vehicle_pose.position.x
         y = vehicle_pose.position.y
@@ -629,66 +648,160 @@ class EnhancedDWAPlanner(Node):
         # Clear previous obstacle positions
         self.lane_obstacle_positions = []
         
-        # Extract the binary map data as a numpy array
-        binary_data = np.array(binary_map.data).reshape((self.map_height, self.map_width))
-        
-        # Check path points for obstacles
-        for i, (px, py) in enumerate(path_points):
-            # Get distance from vehicle to path point
-            distance = math.sqrt((px - x) ** 2 + (py - y) ** 2)
+        try:
+            # Extract the binary map data as a numpy array
+            map_width = binary_map.info.width
+            map_height = binary_map.info.height
+            map_resolution = binary_map.info.resolution
+            map_origin_x = binary_map.info.origin.position.x
+            map_origin_y = binary_map.info.origin.position.y
             
-            # Skip points that are too close to the vehicle - use a smaller distance to ensure
-            # we don't miss obstacles very close to the vehicle
-            if distance < 0.3:  # Reduced from 0.5 to check closer to the vehicle
-                continue
-                
-            # Convert path point to map coordinates
-            map_x = int((px - self.map_origin_x) / self.map_resolution)
-            map_y = int((py - self.map_origin_y) / self.map_resolution)
+            # Convert 1D array to 2D numpy array
+            binary_data = np.array(binary_map.data).reshape((map_height, map_width))
             
-            # Check if point is within map bounds
-            if (map_x < 0 or map_x >= self.map_width or
-                map_y < 0 or map_y >= self.map_height):
-                continue
+            # Log map info if verbose logging is enabled
+            if self.verbose_logging and self.log_obstacle_detection:
+                self.get_logger().info(f"Checking path with {len(path_points)} points against binary map {map_width}x{map_height}")
+                self.get_logger().info(f"Lane threshold min: {self.lane_threshold_min}, max: {self.lane_threshold_max}")
+                self.get_logger().info(f"Obstacle threshold: {self.obstacle_threshold}")
+            
+            # Check path points for obstacles
+            for i, (px, py) in enumerate(path_points):
+                # Get distance from vehicle to path point
+                distance = math.sqrt((px - x) ** 2 + (py - y) ** 2)
                 
-            # Check if point is an obstacle
-            if binary_data[map_y, map_x] > self.obstacle_threshold:
-                obstacle_count += 1
+                # Skip points that are too close to the vehicle
+                if distance < 0.3:
+                    continue
+                    
+                # Convert path point to map coordinates
+                map_x = int((px - map_origin_x) / map_resolution)
+                map_y = int((py - map_origin_y) / map_resolution)
                 
-                # Store obstacle position for visualization and avoidance
-                self.lane_obstacle_positions.append((px, py))
+                # Check if point is within map bounds
+                if (map_x < 0 or map_x >= map_width or
+                    map_y < 0 or map_y >= map_height):
+                    continue
                 
-                # Update closest obstacle distance
-                if distance < closest_obstacle_distance:
-                    closest_obstacle_distance = distance
+                # Get pixel value at this point
+                pixel_value = binary_data[map_y, map_x]
                 
-                # Enhanced obstacle detection: Check if emergency stop is needed
-                if self.emergency_stop_enabled and distance < self.emergency_brake_distance:
-                    self.get_logger().warn(f"Emergency stop triggered: Obstacle at {distance:.2f}m")
-                    has_obstacles = True
-        
-        # Set has_obstacles based on obstacle count and threshold
-        if obstacle_count >= self.min_obstacle_count:
-            has_obstacles = True
-            self.get_logger().info(f"Obstacles detected on path: {obstacle_count} obstacles, closest at {closest_obstacle_distance:.2f}m")
-        
-        # Additional check for very close obstacles - always stop if obstacles are very close
-        if closest_obstacle_distance < 2.0:  # Stop for obstacles within 2 meters
-            has_obstacles = True
-            self.get_logger().warn(f"Close obstacle detected at {closest_obstacle_distance:.2f}m - stopping")
-        
-        # If no obstacles were detected but we have a very close obstacle distance, something's wrong
-        # This likely means we have a false positive - log it but don't stop
-        if has_obstacles and closest_obstacle_distance > 10.0:
-            self.get_logger().warn(f"Possible false obstacle detection: {obstacle_count} obstacles, but closest is {closest_obstacle_distance:.2f}m away")
-            # Only consider it a real obstacle if we have multiple detections
-            has_obstacles = obstacle_count >= self.min_obstacle_count * 2
-        
-        # If we have obstacles, make sure to warn about it
-        if has_obstacles:
-            self.get_logger().warn("Emergency stop: Obstacle detected on path")
-        
-        return has_obstacles
+                # FIRST CHECK: Detect any high-cost cells (like cars) when they're close
+                # The semantic costmap visualizer sets costs to 100 for detected cars
+                if pixel_value >= 90 and distance < 5.0:  # High cost cells within 5 meters
+                    obstacle_count += 1
+                    self.lane_obstacle_positions.append((px, py))
+                    
+                    if self.log_obstacle_detection:
+                        self.get_logger().warn(f"HIGH COST OBSTACLE detected at ({px:.2f}, {py:.2f}), distance: {distance:.2f}m, pixel value: {pixel_value}")
+                    
+                    # Update closest obstacle distance
+                    if distance < closest_obstacle_distance:
+                        closest_obstacle_distance = distance
+                    
+                    # Check if emergency stop is needed
+                    if self.emergency_stop_enabled and distance < self.emergency_brake_distance:
+                        self.get_logger().warn(f"Emergency stop triggered: High cost obstacle at {distance:.2f}m")
+                        has_obstacles = True
+                
+                # SECOND CHECK: Original check for black obstacles on gray lanes
+                # Check if this point is on a lane (gray area)
+                is_on_lane = self.lane_threshold_min <= pixel_value <= self.lane_threshold_max
+                
+                # Only consider obstacles that are black pixels on gray lane areas
+                if is_on_lane:
+                    # Check if there are black pixels (obstacles) in the vicinity
+                    black_pixels_found = 0
+                    for dy in range(-2, 3):  # Check a 5x5 area
+                        for dx in range(-2, 3):
+                            check_x, check_y = map_x + dx, map_y + dy
+                            if (0 <= check_x < map_width and 0 <= check_y < map_height):
+                                check_value = binary_data[check_y, check_x]
+                                # Black pixels have values below obstacle_threshold
+                                if check_value < self.obstacle_threshold:
+                                    black_pixels_found += 1
+                    
+                    # Only consider it an obstacle if we find multiple black pixels
+                    if black_pixels_found >= 3 and distance < self.min_obstacle_distance:
+                        obstacle_count += 1
+                        self.lane_obstacle_positions.append((px, py))
+                        
+                        if self.log_obstacle_detection:
+                            self.get_logger().info(f"Black obstacle ON LANE detected at ({px:.2f}, {py:.2f}), distance: {distance:.2f}m, pixel value: {pixel_value}, black pixels: {black_pixels_found}")
+                        
+                        # Update closest obstacle distance
+                        if distance < closest_obstacle_distance:
+                            closest_obstacle_distance = distance
+                        
+                        # Check if emergency stop is needed
+                        if self.emergency_stop_enabled and distance < self.emergency_brake_distance:
+                            self.get_logger().warn(f"Emergency stop triggered: Black obstacle on lane at {distance:.2f}m")
+                            has_obstacles = True
+                
+                # THIRD CHECK: Look for any obstacles near the vehicle regardless of color/value
+                # This is a safety check for very close objects
+                if distance < 3.0:  # Within 3 meters
+                    # Check surrounding area for any non-free space
+                    high_cost_pixels = 0
+                    for dy in range(-3, 4):  # Check a 7x7 area
+                        for dx in range(-3, 4):
+                            check_x, check_y = map_x + dx, map_y + dy
+                            if (0 <= check_x < map_width and 0 <= check_y < map_height):
+                                check_value = binary_data[check_y, check_x]
+                                # Consider any non-free space as potential obstacle
+                                if check_value > 60:  # Adjust this threshold as needed
+                                    high_cost_pixels += 1
+                    
+                    # If we find enough high cost pixels, consider it an obstacle
+                    if high_cost_pixels >= 5:  # Adjust this threshold as needed
+                        obstacle_count += 1
+                        self.lane_obstacle_positions.append((px, py))
+                        
+                        if self.log_obstacle_detection:
+                            self.get_logger().warn(f"CLOSE PROXIMITY OBSTACLE detected at ({px:.2f}, {py:.2f}), distance: {distance:.2f}m, high cost pixels: {high_cost_pixels}")
+                        
+                        # Update closest obstacle distance
+                        if distance < closest_obstacle_distance:
+                            closest_obstacle_distance = distance
+                        
+                        # Immediate stop for very close obstacles
+                        if distance < 2.0:  # Very close
+                            self.get_logger().error(f"IMMEDIATE STOP: Very close obstacle at {distance:.2f}m")
+                            has_obstacles = True
+            
+            # Set has_obstacles based on obstacle count and threshold
+            if obstacle_count >= self.min_obstacle_count:
+                has_obstacles = True
+                self.get_logger().info(f"Obstacles detected: {obstacle_count} obstacles, closest at {closest_obstacle_distance:.2f}m")
+            
+            # Additional check for very close obstacles
+            if closest_obstacle_distance < self.min_obstacle_distance and obstacle_count > 0:
+                has_obstacles = True
+                self.get_logger().warn(f"Close obstacle detected at {closest_obstacle_distance:.2f}m - stopping (min distance: {self.min_obstacle_distance}m)")
+            
+            # If we have obstacles, make sure to warn about it
+            if has_obstacles:
+                self.get_logger().warn(f"Emergency stop: {obstacle_count} obstacles detected")
+                
+                # Publish obstacle detected message
+                obstacle_msg = Bool()
+                obstacle_msg.data = True
+                self.obstacle_detected_publisher.publish(obstacle_msg)
+                
+                # Visualize the obstacles
+                self.visualize_lane_obstacles()
+            else:
+                # No obstacles detected
+                if self.log_obstacle_detection:
+                    self.get_logger().debug("No obstacles detected")
+            
+            return has_obstacles
+            
+        except Exception as e:
+            self.get_logger().error(f"Error in find_obstacles_on_path: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+            return False
     
     def is_obstacle_in_lane(self, point, vehicle_pose):
         """Check if a point is within the vehicle's lane."""
@@ -851,7 +964,10 @@ class EnhancedDWAPlanner(Node):
         return path_x, path_y, path_yaw, path_v, [v_opt, omega_opt]
         
     def _calc_dynamic_window(self, v, omega):
-        """Calculate the dynamic window based on current state."""
+        """Calculate the dynamic window based on current state and velocity feedback."""
+        # Use velocity feedback from the velocity listener
+        current_v = self.current_velocity
+        
         # Window from robot specification
         v_min = self.min_speed
         v_max = self.max_speed
@@ -860,22 +976,22 @@ class EnhancedDWAPlanner(Node):
         
         # Limit the maximum yaw rate based on current velocity
         # Higher velocities should have more limited steering
-        if v > 0.5:
+        if current_v > 0.5:
             # Reduce max steering angle at higher speeds - make this more aggressive
-            speed_factor = min(1.0, v / self.max_speed)
-            # Reduce max steering to 40% at maximum speed for stability
-            omega_min = -self.max_yaw_rate * (1.0 - 0.6 * speed_factor)
-            omega_max = self.max_yaw_rate * (1.0 - 0.6 * speed_factor)
+            speed_factor = min(1.0, current_v / self.max_speed)
+            # Reduce max steering to 30% at maximum speed for stability
+            omega_min = -self.max_yaw_rate * (1.0 - 0.7 * speed_factor)
+            omega_max = self.max_yaw_rate * (1.0 - 0.7 * speed_factor)
             
             # Additional hard limit on steering at higher speeds
-            if v > 5.0:
-                max_steering_limit = 0.5  # Hard limit steering to 0.5 rad/s at higher speeds
+            if current_v > 16.67:  # 60 km/h
+                max_steering_limit = 0.3  # Hard limit steering to 0.3 rad/s at higher speeds
                 omega_min = max(omega_min, -max_steering_limit)
                 omega_max = min(omega_max, max_steering_limit)
         
-        # Window from motion model (using reference implementation approach)
-        v_lower = max(v_min, v - self.max_accel * self.dt)
-        v_upper = min(v_max, v + self.max_accel * self.dt)
+        # Window from motion model
+        v_lower = max(v_min, current_v - self.max_accel * self.dt)
+        v_upper = min(v_max, current_v + self.max_accel * self.dt)
         
         # Add dampening effect to limit angular velocity changes
         # Reduce the maximum rate of change of angular velocity
@@ -1013,7 +1129,7 @@ class EnhancedDWAPlanner(Node):
             angle += 2.0 * math.pi
         return angle
         
-    def _calc_speed_cost(self, v):
+    def _calc_speed_cost(self, v, w=0.0):
         """Calculate speed cost using the reference implementation approach."""
         # For forward motion, prefer speeds closer to max_speed
         if v < 0.5:
@@ -1022,126 +1138,196 @@ class EnhancedDWAPlanner(Node):
         # Use a cost function that heavily favors higher speeds
         # Lower cost means better (preferred) velocity
         # We want to strongly prefer higher velocities
-        cost = 1.0 - (v / self.max_speed)
+        speed_cost = 1.0 - (v / self.max_speed)
+        
+        # Add penalty for high angular velocity
+        yaw_rate_cost = abs(w) / self.max_yaw_rate
         
         # Apply exponential weighting to make higher speeds much more preferable
-        return cost * cost  # Square the cost to make the preference for high speeds stronger
+        return speed_cost * speed_cost + yaw_rate_cost * 0.5  # Square the cost to make the preference for high speeds stronger
         
     def _calc_obstacle_cost(self, trajectory):
-        """Calculate obstacle cost using the reference implementation approach."""
-        if self.cost_map is None:
+        """Calculate cost based on proximity to obstacles."""
+        if self.map_data is None:
             return float('inf')
             
+        obstacle_cost = 0.0
         min_dist = float('inf')
+        points_outside_lane = 0
+        black_obstacles_on_lane = 0
+        total_points = len(trajectory)
         
-        for point in trajectory:
-            x, y = point[0], point[1]
+        for i in range(len(trajectory)):
+            x, y = trajectory[i][0], trajectory[i][1]
+            map_x, map_y = self._world_to_map(x, y)
             
-            # Convert from map coordinates to grid coordinates
-            grid_x = int((x - self.map_origin_x) / self.map_resolution)
-            grid_y = int((y - self.map_origin_y) / self.map_resolution)
-            
-            # Check if point is within map bounds
-            if 0 <= grid_x < self.cost_map.shape[1] and 0 <= grid_y < self.cost_map.shape[0]:
-                # Get cost at this point
-                cost = self.cost_map[grid_y, grid_x]
+            # Skip if outside map boundaries
+            if not (0 <= map_x < self.map_data.shape[1] and 0 <= map_y < self.map_data.shape[0]):
+                continue
                 
-                # If cost is high (obstacle), return infinite cost with a clearer threshold
-                if cost > self.obstacle_threshold:
+            # Get the pixel value at this point
+            pixel_value = self.map_data[map_y, map_x]
+            
+            # Check if point is on a lane (gray area)
+            is_on_lane = self.lane_threshold_min <= pixel_value <= self.lane_threshold_max
+            
+            # Check if point is outside lane
+            if not is_on_lane:
+                points_outside_lane += 1
+                
+            # Check for black obstacles on lane
+            if is_on_lane:
+                # Count black pixels in the surrounding area
+                black_pixels_count = 0
+                for dy in range(-2, 3):
+                    for dx in range(-2, 3):
+                        check_x, check_y = map_x + dx, map_y + dy
+                        if (0 <= check_x < self.map_data.shape[1] and 
+                            0 <= check_y < self.map_data.shape[0]):
+                            check_value = self.map_data[check_y, check_x]
+                            if check_value < self.obstacle_threshold:
+                                black_pixels_count += 1
+                
+                # If we find enough black pixels on a lane, consider it an obstacle
+                if black_pixels_count >= 3:
+                    black_obstacles_on_lane += 1
+                    # Immediate high cost for trajectories with black obstacles on lane
                     return float('inf')
                 
-                # Track minimum distance to obstacles
-                dist_to_obstacle = 1.0 - cost  # Higher cost means closer to obstacle
-                min_dist = min(min_dist, dist_to_obstacle)
+            # Calculate minimum distance to any obstacle
+            for dy in range(-10, 11):
+                for dx in range(-10, 11):
+                    check_x, check_y = map_x + dx, map_y + dy
+                    if (0 <= check_x < self.map_data.shape[1] and
+                        0 <= check_y < self.map_data.shape[0]):
+                        check_value = self.map_data[check_y, check_x]
+                        # Only consider black pixels as obstacles
+                        if check_value < self.obstacle_threshold:
+                            dist = np.hypot(dx, dy)
+                            if dist < min_dist:
+                                min_dist = dist
+        
+        # Penalize trajectories with too many points outside the lane
+        lane_penalty = 0.0
+        if total_points > 0:
+            outside_lane_ratio = points_outside_lane / total_points
+            if outside_lane_ratio > 0.5:  # More than 50% outside lane
+                lane_penalty = 2.0 * outside_lane_ratio
+        
+        # Distance cost (higher when closer to obstacles)
+        if min_dist < float('inf'):
+            obstacle_cost = 1.0 / (min_dist + 0.001)
+        
+        # Add a severe penalty for trajectories with black obstacles on lane
+        if black_obstacles_on_lane > 0:
+            obstacle_cost += 10.0 * black_obstacles_on_lane
+        
+        return obstacle_cost + lane_penalty
+
+    def _is_trajectory_safe(self, trajectory):
+        """Check if a trajectory is safe (no collisions and mostly within lane)."""
+        if self.map_data is None:
+            return False
+
+        points_outside_lane = 0
+        total_points = len(trajectory)
+        black_obstacles_on_lane = 0
+        
+        for x, y in trajectory:
+            map_x, map_y = self._world_to_map(x, y)
+            
+            # Check map bounds
+            if not (0 <= map_x < self.map_data.shape[1] and 0 <= map_y < self.map_data.shape[0]):
+                return False
+            
+            # Get the pixel value at this point
+            pixel_value = self.map_data[map_y, map_x]
+            
+            # Check if point is on a lane (gray area)
+            is_on_lane = self.lane_threshold_min <= pixel_value <= self.lane_threshold_max
+            
+            # Count points outside lane
+            if not is_on_lane:
+                points_outside_lane += 1
+            
+            # Check for black obstacles on lane
+            if is_on_lane:
+                # Count black pixels in the surrounding area
+                black_pixels_count = 0
+                for dy in range(-2, 3):
+                    for dx in range(-2, 3):
+                        check_x, check_y = map_x + dx, map_y + dy
+                        if (0 <= check_x < self.map_data.shape[1] and 
+                            0 <= check_y < self.map_data.shape[0]):
+                            check_value = self.map_data[check_y, check_x]
+                            if check_value < self.obstacle_threshold:
+                                black_pixels_count += 1
                 
-                # Check surrounding pixels for obstacles (wider search area)
-                for dx in range(-2, 3):  # -2 to +2 (5x5 window)
-                    for dy in range(-2, 3):
-                        nx, ny = grid_x + dx, grid_y + dy
-                        if 0 <= nx < self.cost_map.shape[1] and 0 <= ny < self.cost_map.shape[0]:
-                            surr_cost = self.cost_map[ny, nx]
-                            if surr_cost > self.obstacle_threshold:
-                                # Calculate distance to this cell
-                                cell_dist = math.hypot(dx, dy) * self.map_resolution
-                                if cell_dist < self.safe_distance:
-                                    return float('inf')
-        
-        # If trajectory is clear of obstacles, return cost based on minimum distance
-        if min_dist == float('inf'):
-            return 0.0  # No obstacles nearby
-        
-        # Return cost that's inversely proportional to distance - closer obstacles = higher cost
-        return 1.0 / (min_dist + 1e-6)  # Add small epsilon to prevent division by zero
-        
+                # If we find enough black pixels on a lane, consider it unsafe
+                if black_pixels_count >= 3:
+                    black_obstacles_on_lane += 1
+                    # Trajectory is unsafe if we find black obstacles on lane
+                    if black_obstacles_on_lane > 0:
+                        return False
+
+        # Reject if more than 50% of points are outside lane
+        return (points_outside_lane / total_points) <= 0.5
+
     def _calc_goal_cost(self, trajectory, gx, gy):
-        """Calculate goal cost using the reference implementation approach."""
-        # Use the last point in the trajectory
+        """Calculate goal cost for a trajectory."""
         if not trajectory:
             return float('inf')
+
+        # Get end position and orientation
+        end_x, end_y = trajectory[-1][0], trajectory[-1][1]
+        if len(trajectory) > 1:
+            dx = end_x - trajectory[-2][0]
+            dy = end_y - trajectory[-2][1]
+            end_yaw = np.arctan2(dy, dx)
+        else:
+            # If only one point, use current vehicle orientation
+            with self.state_lock:
+                end_yaw = self.current_theta
+
+        # Calculate distance to goal
+        goal_x, goal_y = gx, gy
+        dist_to_goal = np.hypot(goal_x - end_x, goal_y - end_y)
+
+        # Calculate heading error to goal
+        goal_heading = np.arctan2(goal_y - end_y, goal_x - end_x)
+        heading_error = abs(self._normalize_angle(goal_heading - end_yaw))
+
+        # Combine distance and heading costs
+        distance_cost = dist_to_goal * self.to_goal_cost_gain
+        heading_cost = heading_error * 2.0  # Weight for heading error
+
+        return distance_cost + heading_cost
+
+    def _is_near_goal(self, threshold=3.0):
+        """Check if we're near the goal."""
+        if not self.current_goal:
+            return False
+        current_x, current_y = self.current_pose[0], self.current_pose[1]
+        goal_x, goal_y = self.current_goal
+        return np.hypot(goal_x - current_x, goal_y - current_y) < threshold
+
+    def _is_near_obstacle(self, threshold=5.0):
+        """Check if there are obstacles nearby."""
+        if self.map_data is None:
+            return False
             
-        # Calculate Euclidean distance to goal
-        dx = trajectory[-1][0] - gx
-        dy = trajectory[-1][1] - gy
-        dist = math.hypot(dx, dy)
+        current_x, current_y = self.current_pose[0], self.current_pose[1]
+        map_x, map_y = self._world_to_map(current_x, current_y)
         
-        return dist
-        
-    def _calc_path_following_cost(self, trajectory):
-        """Calculate path following cost using the reference implementation approach."""
-        if not self.waypoints or not trajectory:
-            return 0.0
-            
-        # Calculate cost based on distance to the reference path
-        total_dist = 0.0
-        
-        # Get vehicle position from first trajectory point
-        vx, vy = trajectory[0][0], trajectory[0][1]
-        
-        # Find closest waypoint to vehicle
-        closest_wp_idx = 0
-        min_dist = float('inf')
-        for i, waypoint in enumerate(self.waypoints):
-            dist = math.hypot(waypoint['x'] - vx, waypoint['y'] - vy)
-            if dist < min_dist:
-                min_dist = dist
-                closest_wp_idx = i
-        
-        # Look ahead by a few waypoints for better path following
-        lookahead_idx = min(closest_wp_idx + 5, len(self.waypoints) - 1)
-        
-        # Calculate cost for each trajectory point
-        for i, point in enumerate(trajectory):
-            x, y = point[0], point[1]
-            
-            # Progressive waypoint targeting - look further ahead for later points in trajectory
-            target_wp_idx = min(closest_wp_idx + i//2, len(self.waypoints) - 1)
-            
-            # Find closest waypoint within a window around the target index
-            window_size = 5  # Look at 5 waypoints before and after
-            start_idx = max(0, target_wp_idx - window_size)
-            end_idx = min(len(self.waypoints) - 1, target_wp_idx + window_size)
-            
-            # Find closest waypoint in this window
-            min_wp_dist = float('inf')
-            for j in range(start_idx, end_idx + 1):
-                wp = self.waypoints[j]
-                dist = math.hypot(wp['x'] - x, wp['y'] - y)
-                min_wp_dist = min(min_wp_dist, dist)
-            
-            # Add to cost - weight later points more heavily
-            # This encourages the trajectory to converge to the path over time
-            point_weight = 1.0 + i * 0.1  # Increase weight for later points
-            total_dist += min_wp_dist * point_weight
-        
-        # Average cost
-        avg_cost = total_dist / len(trajectory)
-        
-        # Apply a non-linear penalty for large deviations
-        # This makes the planner strongly avoid trajectories that deviate significantly
-        if avg_cost > 2.0:  # If average deviation is more than 2 meters
-            avg_cost = avg_cost * 1.5  # Apply a stronger penalty
-        
-        return avg_cost
+        for dy in range(-int(threshold), int(threshold) + 1):
+            for dx in range(-int(threshold), int(threshold) + 1):
+                check_x, check_y = map_x + dx, map_y + dy
+                if (0 <= check_x < self.map_data.shape[1] and 
+                    0 <= check_y < self.map_data.shape[0]):
+                    check_value = self.map_data[check_y, check_x]
+                    if check_value > self.obstacle_threshold:
+                        return True
+        return False
     
     def find_safe_point_around(self, robot_pos, obstacles, search_radius=15, cost_thresh=0.2):
         """Find a safe point around the robot when obstacles are detected"""
@@ -1189,95 +1375,6 @@ class EnhancedDWAPlanner(Node):
             return safe_points[0]
         
         return None
-    
-    def publish_parking_spots(self):
-        """Publish visualization markers for detected parking spots"""
-        if not self.parking_spots:
-            return
-        
-        marker_array = MarkerArray()
-        
-        for i, spot in enumerate(self.parking_spots):
-            # Create marker for parking spot
-            marker = Marker()
-            marker.header.frame_id = self.map_frame_id
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns = "parking_spots"
-            marker.id = i
-            marker.type = Marker.CUBE
-            marker.action = Marker.ADD
-            
-            # Set position
-            marker.pose.position.x = spot.x
-            marker.pose.position.y = spot.y
-            marker.pose.position.z = 0.1  # Slightly above ground
-            
-            # Set orientation from angle
-            q = quaternion_from_euler(0, 0, spot.angle)
-            marker.pose.orientation.x = q[0]
-            marker.pose.orientation.y = q[1]
-            marker.pose.orientation.z = q[2]
-            marker.pose.orientation.w = q[3]
-            
-            # Set dimensions
-            marker.scale.x = spot.length
-            marker.scale.y = spot.width
-            marker.scale.z = 0.1
-            
-            # Set color (blue for safe, yellow for unsafe)
-            marker.color.r = 0.0 if spot.is_safe else 1.0
-            marker.color.g = 0.7 if spot.is_safe else 1.0
-            marker.color.b = 1.0 if spot.is_safe else 0.0
-            marker.color.a = 0.7  # Semi-transparent
-            
-            marker.lifetime = Duration(sec=int(self.parking_visualization_lifetime), 
-                                      nanosec=int((self.parking_visualization_lifetime % 1) * 1e9))
-            
-            marker_array.markers.append(marker)
-            
-            # Add text marker with dimensions
-            text_marker = Marker()
-            text_marker.header = marker.header
-            text_marker.ns = "parking_labels"
-            text_marker.id = i
-            text_marker.type = Marker.TEXT_VIEW_FACING
-            text_marker.action = Marker.ADD
-            text_marker.pose.position.x = spot.x
-            text_marker.pose.position.y = spot.y
-            text_marker.pose.position.z = 0.5  # Above the spot
-            text_marker.text = f"Parking: {spot.width:.1f}x{spot.length:.1f}m"
-            text_marker.scale.z = 0.5  # Text height
-            text_marker.color.r = 1.0
-            text_marker.color.g = 1.0
-            text_marker.color.b = 1.0
-            text_marker.color.a = 1.0
-            text_marker.lifetime = Duration(sec=int(self.parking_visualization_lifetime), 
-                                           nanosec=int((self.parking_visualization_lifetime % 1) * 1e9))
-            
-            marker_array.markers.append(text_marker)
-            
-            # Add arrow marker to show orientation
-            arrow_marker = Marker()
-            arrow_marker.header = marker.header
-            arrow_marker.ns = "parking_arrows"
-            arrow_marker.id = i
-            arrow_marker.type = Marker.ARROW
-            arrow_marker.action = Marker.ADD
-            arrow_marker.pose = marker.pose
-            arrow_marker.scale.x = spot.length * 0.8  # Arrow length
-            arrow_marker.scale.y = 0.2  # Arrow width
-            arrow_marker.scale.z = 0.2  # Arrow height
-            arrow_marker.color.r = 0.0
-            arrow_marker.color.g = 0.0
-            arrow_marker.color.b = 0.0
-            arrow_marker.color.a = 0.8
-            arrow_marker.lifetime = Duration(sec=int(self.parking_visualization_lifetime), 
-                                            nanosec=int((self.parking_visualization_lifetime % 1) * 1e9))
-            
-            marker_array.markers.append(arrow_marker)
-        
-        # Publish markers
-        self.parking_spots_publisher.publish(marker_array)
     
     def generate_curved_path(self, start_point, end_point, obstacles, num_points=10):
         """Generate a curved path to navigate around obstacles"""
@@ -1557,140 +1654,133 @@ class EnhancedDWAPlanner(Node):
         return path_msg
     
     def enhanced_dwa_control(self, best_u, vehicle_pose, stop_for_obstacles):
-        """Apply enhanced DWA control with obstacle awareness."""
-        cmd_vel = Twist()
+        """Enhanced DWA control with velocity-aware heading alignment."""
+        if best_u is None or len(best_u) != 2:
+            return None
+
+        # Get current target waypoint
+        closest_idx = self.find_closest_waypoint(vehicle_pose)
+        if closest_idx is None:
+            return None
+            
+        target_idx, target_waypoint = self.get_target_waypoint(closest_idx, vehicle_pose)
+        if target_waypoint is None:
+            return None
+
+        # Calculate desired heading to waypoint
+        dx = target_waypoint['x'] - vehicle_pose.position.x
+        dy = target_waypoint['y'] - vehicle_pose.position.y
+        desired_heading = np.arctan2(dy, dx)
         
-        # Extract vehicle position and orientation
-        x = vehicle_pose.position.x
-        y = vehicle_pose.position.y
+        # Current heading
         quat = vehicle_pose.orientation
-        _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
+        _, _, current_heading = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
         
-        # Extract best velocity commands
-        v_opt, omega_opt = best_u
+        # Calculate heading error
+        heading_error = self._normalize_angle(desired_heading - current_heading)
+        
+        # Use velocity feedback from the velocity listener
+        # Note: self.current_velocity is updated by the velocity_callback method
+        current_speed = max(self.current_velocity, 0.1)  # m/s, ensure non-zero
+        
+        # Dynamic steering gain based on velocity
+        # Higher gain at lower speeds, lower gain at higher speeds
+        base_gain = 2.0
+        speed_factor = 16.67 / current_speed  # 16.67 m/s = 60 km/h reference speed
+        Kp = base_gain * min(speed_factor, 2.0)  # Cap the gain increase at low speeds
+        
+        # Calculate steering command
+        # Note: Inverting the sign because right steer corresponds to left on the map
+        omega = -Kp * heading_error
+        
+        # Additional damping at high speeds
+        if current_speed > 16.67:  # Above 60 km/h
+            damping_factor = 0.7 * (current_speed - 16.67) / 16.67
+            omega *= (1.0 - damping_factor)
+        
+        # Limit omega based on speed
+        # Lower max yaw rate at higher speeds for stability
+        speed_scaled_max_yaw = self.max_yaw_rate * (1.0 - min(current_speed / 27.78, 0.7))
+        omega = max(min(omega, speed_scaled_max_yaw), -speed_scaled_max_yaw)
+        
+        # Initialize velocity
+        v_opt = best_u[0]
         
         # Check if we should stop for obstacles
         if stop_for_obstacles:
             # Find the closest obstacle distance
             closest_obstacle = float('inf')
+            obstacle_count = 0
+            
             if self.lane_obstacle_positions:
+                vehicle_x, vehicle_y = vehicle_pose.position.x, vehicle_pose.position.y
+                
                 for obs_x, obs_y in self.lane_obstacle_positions:
-                    dist = math.sqrt((obs_x - x) ** 2 + (obs_y - y) ** 2)
+                    # Calculate distance to obstacle
+                    dist = math.sqrt((obs_x - vehicle_x) ** 2 + (obs_y - vehicle_y) ** 2)
+                    obstacle_count += 1
                     closest_obstacle = min(closest_obstacle, dist)
+                    
+                    # Log obstacle information
+                    map_x, map_y = self._world_to_map(obs_x, obs_y)
+                    if (0 <= map_x < self.map_data.shape[1] and 0 <= map_y < self.map_data.shape[0]):
+                        pixel_value = self.map_data[map_y, map_x]
+                        self.get_logger().debug(f"Obstacle at ({obs_x:.2f}, {obs_y:.2f}), distance: {dist:.2f}m, pixel value: {pixel_value}")
             
-            # Apply progressive braking based on obstacle distance
-            if closest_obstacle < self.emergency_brake_distance * 0.5:
-                # Very close obstacle - emergency stop
+            # Apply emergency stop based on obstacle distance
+            if closest_obstacle < self.min_obstacle_distance and obstacle_count > 0:
+                # Stop completely when obstacles are detected within min_obstacle_distance
                 v_opt = 0.0  # Full stop
-                omega_opt = 0.0  # Stop turning
-                self.get_logger().warn(f"Emergency stop: Obstacle at {closest_obstacle:.2f}m")
-            elif closest_obstacle < self.emergency_brake_distance:
-                # Obstacle in braking zone - slow down proportionally
-                slow_factor = closest_obstacle / self.emergency_brake_distance
-                v_opt = max(0.0, v_opt * slow_factor)
+                self.get_logger().warn(f"EMERGENCY STOP: {obstacle_count} obstacles detected at {closest_obstacle:.2f}m")
+                
+                # Reduce steering when stopped to prevent oscillations
+                if closest_obstacle < self.min_obstacle_distance * 0.5:
+                    omega = 0.0  # No steering when very close to obstacles
+                    self.get_logger().warn("Steering disabled due to very close obstacle")
+                else:
+                    # Reduce steering when close to obstacles but not extremely close
+                    omega *= 0.5  # Reduce steering by half
+            elif closest_obstacle < self.emergency_brake_distance and obstacle_count > 0:
+                # Slow down when obstacles are within emergency_brake_distance but beyond min_obstacle_distance
+                slow_factor = (closest_obstacle - self.min_obstacle_distance) / (self.emergency_brake_distance - self.min_obstacle_distance)
+                v_opt = best_u[0] * max(0.2, slow_factor)  # Ensure at least 20% of speed
                 self.get_logger().info(f"Slowing down: Obstacle at {closest_obstacle:.2f}m, speed reduced to {v_opt:.2f} m/s")
-            else:
-                # Obstacle detected but not in immediate danger zone - reduce speed slightly
-                v_opt = max(0.0, v_opt * 0.7)
-                self.get_logger().info(f"Cautious speed: Obstacle at {closest_obstacle:.2f}m, speed reduced to {v_opt:.2f} m/s")
             
-            # Try to steer away from obstacles if we're still moving
-            if v_opt > 0.1 and self.lane_obstacle_positions:
-                avoidance_omega = self._calculate_avoidance_steering(vehicle_pose)
-                if avoidance_omega is not None:
-                    # Blend the avoidance steering with the optimal steering
-                    omega_opt = 0.7 * avoidance_omega + 0.3 * omega_opt
-                    self.get_logger().info(f"Obstacle avoidance steering: {omega_opt:.2f} rad/s")
-            
-            # Publish obstacle detected message
-            obstacle_msg = Bool()
-            obstacle_msg.data = True
-            self.obstacle_detected_publisher.publish(obstacle_msg)
+            # Publish obstacle detected message if we have obstacles
+            if obstacle_count > 0:
+                obstacle_msg = Bool()
+                obstacle_msg.data = True
+                self.obstacle_detected_publisher.publish(obstacle_msg)
         else:
             # No obstacles, use a reasonable forward velocity
+            # Adjust speed based on heading error
+            heading_factor = 1.0 - (abs(heading_error) / np.pi)
+            
+            if current_speed > 16.67:  # Above 60 km/h
+                heading_factor = heading_factor ** 2  # Squared for stronger effect at high speeds
+            
+            v_opt = best_u[0] * max(0.4, heading_factor)  # Maintain at least 40% of speed
+            
             # Force a minimum forward velocity to get the vehicle moving
-            v_opt = max(2.0, v_opt)  # Always at least 2.0 m/s
+            v_opt = max(2.0, v_opt)
             
             # Publish normal message
             obstacle_msg = Bool()
             obstacle_msg.data = False
             self.obstacle_detected_publisher.publish(obstacle_msg)
             
-            self.get_logger().info(f"Moving forward at velocity: {v_opt:.2f} m/s")
+            self.get_logger().debug(f"Moving forward at velocity: {v_opt:.2f} m/s, heading error: {heading_error:.2f} rad")
         
-        # Apply steering smoothing for more natural motion
-        # Use stronger smoothing for steering
-        smoothing_factor = 0.5  # Changed from 0.7 to 0.5 (50% new, 50% previous)
-        smoothed_omega = smoothing_factor * omega_opt + (1.0 - smoothing_factor) * self.current_omega
-        
-        # Limit steering angle at higher speeds for stability
-        speed_factor = min(1.0, abs(v_opt) / self.max_speed)
-        max_omega_at_speed = self.max_yaw_rate * (1.0 - 0.7 * speed_factor)  # Reduce max steering at high speeds
-        smoothed_omega = max(min(smoothed_omega, max_omega_at_speed), -max_omega_at_speed)
-        
-        # Set the command velocity
-        cmd_vel.linear.x = v_opt
-        cmd_vel.angular.z = smoothed_omega
+        # Create and return control message
+        control_msg = Twist()
+        control_msg.linear.x = v_opt
+        control_msg.angular.z = omega
         
         # Update current velocity and angular velocity
         self.current_v = v_opt
-        self.current_omega = smoothed_omega
-        
-        return cmd_vel
-    
-    def _calculate_avoidance_steering(self, vehicle_pose):
-        """Calculate steering command for obstacle avoidance."""
-        if not self.lane_obstacle_positions or len(self.lane_obstacle_positions) == 0:
-            return 0.0
-        
-        # Get vehicle position and orientation
-        vehicle_x, vehicle_y = vehicle_pose.position.x, vehicle_pose.position.y
-        quat = vehicle_pose.orientation
-        _, _, vehicle_yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
-        
-        # Calculate average obstacle position
-        avg_x = sum(pos[0] for pos in self.lane_obstacle_positions) / len(self.lane_obstacle_positions)
-        avg_y = sum(pos[1] for pos in self.lane_obstacle_positions) / len(self.lane_obstacle_positions)
-        
-        # Calculate vector from vehicle to average obstacle
-        dx = avg_x - vehicle_x
-        dy = avg_y - vehicle_y
-        
-        # Calculate distance to obstacle
-        distance = math.sqrt(dx*dx + dy*dy)
-        
-        # If obstacle is too far, don't steer
-        if distance > self.obstacle_detection_range:
-            return 0.0
-        
-        # Calculate angle to obstacle in vehicle frame
-        obstacle_angle = math.atan2(dy, dx) - vehicle_yaw
-        
-        # Normalize angle to [-pi, pi]
-        while obstacle_angle > math.pi:
-            obstacle_angle -= 2.0 * math.pi
-        while obstacle_angle < -math.pi:
-            obstacle_angle += 2.0 * math.pi
-        
-        # Determine steering direction (away from obstacle)
-        # If obstacle is on the right, steer left (negative angle)
-        # If obstacle is on the left, steer right (positive angle)
-        steering_direction = -1.0 if obstacle_angle > 0.0 else 1.0
-        
-        # Calculate steering magnitude based on obstacle angle and distance
-        # Closer obstacles and more central obstacles require stronger steering
-        steering_magnitude = abs(math.sin(obstacle_angle)) * (1.0 - min(1.0, distance / self.obstacle_detection_range))
-        
-        # Apply a gain to the steering command
-        steering_gain = 0.8
-        steering_cmd = steering_direction * steering_magnitude * steering_gain
-        
-        # Limit maximum steering
-        max_steering = 0.8
-        if abs(steering_cmd) > max_steering:
-            steering_cmd = max_steering * (1.0 if steering_cmd > 0.0 else -1.0)
-        
-        return steering_cmd
+        self.current_omega = omega
+
+        return control_msg
     
     def _find_safe_path_around_obstacles(self, vehicle_pose):
         """Find a safe path around obstacles when stopped."""
@@ -1779,68 +1869,8 @@ class EnhancedDWAPlanner(Node):
         
         super().destroy_node()
     
-    def visualize_lane_obstacles(self, obstacles, lane_width):
-        """Visualize lane obstacles for debugging"""
-        marker_array = MarkerArray()
-        
-        for i, (ox, oy, wp_idx) in enumerate(obstacles):
-            # Create marker for obstacle
-            marker = Marker()
-            marker.header.frame_id = self.map_frame_id
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns = "lane_obstacles"
-            marker.id = i
-            marker.type = Marker.CYLINDER
-            marker.action = Marker.ADD
-            
-            # Set position
-            marker.pose.position.x = ox
-            marker.pose.position.y = oy
-            marker.pose.position.z = 0.5  # Half height above ground
-            
-            # Set orientation (identity quaternion)
-            marker.pose.orientation.w = 1.0
-            
-            # Set dimensions
-            marker.scale.x = 0.8  # Smaller diameter for obstacles (not as wide as lane)
-            marker.scale.y = 0.8
-            marker.scale.z = 1.5  # Taller height for better visibility
-            
-            # Set color (bright red for obstacles, distinct from parking spots)
-            marker.color.r = 1.0
-            marker.color.g = 0.0
-            marker.color.b = 0.0
-            marker.color.a = 0.7  # More opaque
-            
-            marker.lifetime = Duration(sec=0, nanosec=int(0.5 * 1e9))  # 0.5 second lifetime
-            
-            marker_array.markers.append(marker)
-            
-            # Add text label for obstacles
-            text_marker = Marker()
-            text_marker.header = marker.header
-            text_marker.ns = "obstacle_labels"
-            text_marker.id = i
-            text_marker.type = Marker.TEXT_VIEW_FACING
-            text_marker.action = Marker.ADD
-            text_marker.pose.position.x = ox
-            text_marker.pose.position.y = oy
-            text_marker.pose.position.z = 1.5  # Above the obstacle
-            text_marker.text = "OBSTACLE"
-            text_marker.scale.z = 0.5  # Text height
-            text_marker.color.r = 1.0
-            text_marker.color.g = 1.0
-            text_marker.color.b = 1.0
-            text_marker.color.a = 1.0
-            text_marker.lifetime = Duration(sec=0, nanosec=int(0.5 * 1e9))
-            
-            marker_array.markers.append(text_marker)
-        
-        # Publish the markers
-        self.marker_publisher.publish(marker_array)
-    
     def visualize_lane_obstacles(self):
-        """Visualize obstacles detected in the vehicle's lane."""
+        """Visualize obstacles detected on the path."""
         if not self.lane_obstacle_positions or len(self.lane_obstacle_positions) == 0:
             return
             
@@ -1849,11 +1879,52 @@ class EnhancedDWAPlanner(Node):
         
         # Create markers for each obstacle
         for i, (x, y) in enumerate(self.lane_obstacle_positions):
+            # Check the obstacle type
+            map_x, map_y = self._world_to_map(x, y)
+            obstacle_type = "UNKNOWN"
+            obstacle_color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.8)  # Default red
+            
+            if (0 <= map_x < self.map_data.shape[1] and 0 <= map_y < self.map_data.shape[0]):
+                pixel_value = self.map_data[map_y, map_x]
+                
+                # Determine obstacle type based on pixel value
+                if pixel_value >= 90:
+                    obstacle_type = "HIGH COST OBSTACLE"
+                    obstacle_color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.8)  # Red
+                elif pixel_value < self.obstacle_threshold:
+                    # Check if it's on a lane
+                    is_on_lane = self.lane_threshold_min <= pixel_value <= self.lane_threshold_max
+                    if is_on_lane:
+                        obstacle_type = "BLACK OBSTACLE ON LANE"
+                        obstacle_color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.8)  # Red
+                    else:
+                        obstacle_type = "BLACK OBSTACLE"
+                        obstacle_color = ColorRGBA(r=0.8, g=0.0, b=0.8, a=0.8)  # Purple
+                else:
+                    # Check surrounding area for high cost pixels
+                    high_cost_pixels = 0
+                    for dy in range(-3, 4):
+                        for dx in range(-3, 4):
+                            check_x, check_y = map_x + dx, map_y + dy
+                            if (0 <= check_x < self.map_data.shape[1] and 
+                                0 <= check_y < self.map_data.shape[0]):
+                                check_value = self.map_data[check_y, check_x]
+                                if check_value > 60:
+                                    high_cost_pixels += 1
+                    
+                    if high_cost_pixels >= 5:
+                        obstacle_type = "PROXIMITY OBSTACLE"
+                        obstacle_color = ColorRGBA(r=1.0, g=0.5, b=0.0, a=0.8)  # Orange
+            
+            # Calculate distance from vehicle position to obstacle
+            vehicle_x, vehicle_y = self.current_pose[0], self.current_pose[1]
+            distance = math.sqrt((x - vehicle_x) ** 2 + (y - vehicle_y) ** 2)
+            
             # Create sphere marker
             sphere_marker = Marker()
             sphere_marker.header.frame_id = self.map_frame_id
             sphere_marker.header.stamp = self.get_clock().now().to_msg()
-            sphere_marker.ns = "lane_obstacles"
+            sphere_marker.ns = "obstacles"
             sphere_marker.id = i
             sphere_marker.type = Marker.SPHERE
             sphere_marker.action = Marker.ADD
@@ -1866,21 +1937,19 @@ class EnhancedDWAPlanner(Node):
             # Set orientation (identity quaternion)
             sphere_marker.pose.orientation.w = 1.0
             
-            # Set scale
-            sphere_marker.scale.x = 0.5
-            sphere_marker.scale.y = 0.5
-            sphere_marker.scale.z = 0.5
+            # Set scale - make closer obstacles appear larger
+            scale_factor = max(0.5, min(2.0, 3.0 / (distance + 0.1)))
+            sphere_marker.scale.x = 0.5 * scale_factor
+            sphere_marker.scale.y = 0.5 * scale_factor
+            sphere_marker.scale.z = 0.5 * scale_factor
             
-            # Set color (bright red for obstacles)
-            sphere_marker.color.r = 1.0
-            sphere_marker.color.g = 0.0
-            sphere_marker.color.b = 0.0
-            sphere_marker.color.a = 0.8
+            # Set color
+            sphere_marker.color = obstacle_color
             
-            # Set lifetime - fix Duration usage
+            # Set lifetime
             lifetime_sec = 0.5
             sphere_marker.lifetime = Duration(sec=int(lifetime_sec), 
-                                             nanosec=int((lifetime_sec % 1) * 1e9))
+                                            nanosec=int((lifetime_sec % 1) * 1e9))
             
             marker_array.markers.append(sphere_marker)
             
@@ -1888,7 +1957,7 @@ class EnhancedDWAPlanner(Node):
             text_marker = Marker()
             text_marker.header.frame_id = self.map_frame_id
             text_marker.header.stamp = self.get_clock().now().to_msg()
-            text_marker.ns = "lane_obstacles_text"
+            text_marker.ns = "obstacle_text"
             text_marker.id = i
             text_marker.type = Marker.TEXT_VIEW_FACING
             text_marker.action = Marker.ADD
@@ -1899,7 +1968,7 @@ class EnhancedDWAPlanner(Node):
             text_marker.pose.position.z = 1.0
             
             # Set text
-            text_marker.text = "OBSTACLE"
+            text_marker.text = f"{obstacle_type}\nDist: {distance:.2f}m"
             
             # Set scale
             text_marker.scale.z = 0.5  # Text height
@@ -1910,14 +1979,14 @@ class EnhancedDWAPlanner(Node):
             text_marker.color.b = 1.0
             text_marker.color.a = 0.8
             
-            # Set lifetime - fix Duration usage
+            # Set lifetime
             text_marker.lifetime = Duration(sec=int(lifetime_sec), 
-                                           nanosec=int((lifetime_sec % 1) * 1e9))
-                            
+                                        nanosec=int((lifetime_sec % 1) * 1e9))
+                        
             marker_array.markers.append(text_marker)
         
         # Publish marker array
-        self.parking_spots_publisher.publish(marker_array)
+        self.obstacle_viz_pub.publish(marker_array)
     
     def visualize_target_waypoint(self, target_waypoint):
         """Visualize the target waypoint for debugging."""
@@ -1996,6 +2065,242 @@ class EnhancedDWAPlanner(Node):
         
         # Publish marker array
         self.marker_publisher.publish(marker_array)
+    
+    
+        
+    def radar_callback(self, msg):
+        """Process radar detection data"""
+        if not self.use_sensor_obstacles:
+            return
+            
+        # Process radar detections
+        self.radar_obstacles = []
+        for detection in msg.detections:
+            x = detection.pose.position.x
+            y = detection.pose.position.y
+            vel_x = detection.velocity.x
+            vel_y = detection.velocity.y
+            velocity = math.sqrt(vel_x**2 + vel_y**2)
+            
+            # Only track moving obstacles above velocity threshold
+            if velocity > self.obstacle_velocity_threshold:
+                self.radar_obstacles.append((x, y, velocity))
+                
+        self.update_dynamic_obstacles()
+        
+    def obstacle_map_callback(self, msg):
+        """Process obstacle map data"""
+        if not self.use_sensor_obstacles:
+            return
+            
+        self.obstacle_map = msg
+        self.update_obstacle_grid()
+        
+    def obstacle_detection_callback(self, msg):
+        """Process obstacle detection data"""
+        if not self.use_sensor_obstacles:
+            return
+            
+        # Update detected obstacles
+        self.detected_obstacles = []
+        for obstacle in msg.obstacles:
+            x = obstacle.pose.position.x
+            y = obstacle.pose.position.y
+            obstacle_class = obstacle.classification
+            self.detected_obstacles.append((x, y, obstacle_class))
+            
+        self.last_obstacle_time = self.get_clock().now()
+        
+    def cluster_and_track_obstacles(self):
+        """Cluster point cloud data into obstacles and track them"""
+        if len(self.lidar_obstacles) < self.min_obstacle_points:
+            return
+            
+        # Use DBSCAN clustering
+        clusters = []
+        points = np.array(self.lidar_obstacles)
+        db = DBSCAN(eps=self.obstacle_cluster_tolerance, min_samples=self.min_obstacle_points).fit(points)
+        labels = db.labels_
+        
+        # Process clusters
+        unique_labels = set(labels)
+        for label in unique_labels:
+            if label == -1:  # Skip noise
+                continue
+                
+            cluster_points = points[labels == label]
+            center = np.mean(cluster_points, axis=0)
+            clusters.append(center)
+            
+        # Update obstacle tracking
+        self.update_obstacle_tracking(clusters)
+        
+    def update_dynamic_obstacles(self):
+        """Update dynamic obstacle tracking"""
+        if not self.dynamic_obstacle_tracking:
+            return
+            
+        current_time = self.get_clock().now()
+        
+        # Predict obstacle positions based on velocity
+        for obstacle in self.radar_obstacles:
+            x, y, velocity = obstacle
+            dt = (current_time - self.last_obstacle_time).nanoseconds / 1e9
+            
+            # Simple linear prediction
+            pred_x = x + velocity * dt * math.cos(math.atan2(y, x))
+            pred_y = y + velocity * dt * math.sin(math.atan2(y, x))
+            
+            # Add predicted position to tracking
+            self.update_obstacle_tracking([(pred_x, pred_y)])
+            
+    def update_obstacle_grid(self):
+        """Update the obstacle grid with sensor data"""
+        if self.obstacle_map is None:
+            return
+            
+        # Combine all obstacle sources
+        all_obstacles = []
+        all_obstacles.extend(self.lidar_obstacles)
+        all_obstacles.extend([(x, y) for x, y, _ in self.radar_obstacles])
+        all_obstacles.extend([(x, y) for x, y, _ in self.detected_obstacles])
+        
+        # Update grid cells
+        for x, y in all_obstacles:
+            # Convert to grid coordinates
+            grid_x = int((x - self.obstacle_map.info.origin.position.x) / self.obstacle_map.info.resolution)
+            grid_y = int((y - self.obstacle_map.info.origin.position.y) / self.obstacle_map.info.resolution)
+            
+            # Check bounds
+            if (0 <= grid_x < self.obstacle_map.info.width and 
+                0 <= grid_y < self.obstacle_map.info.height):
+                # Mark cell as obstacle
+                index = grid_y * self.obstacle_map.info.width + grid_x
+                self.obstacle_map.data[index] = 100
+                
+        # Inflate obstacles
+        self.inflate_obstacles()
+        
+    def inflate_obstacles(self):
+        """Inflate obstacles in the grid"""
+        if self.obstacle_map is None:
+            return
+            
+        # Calculate inflation radius in grid cells
+        inflation_cells = int(self.obstacle_inflation_radius / self.obstacle_map.info.resolution)
+        
+        # Create a copy of the grid
+        inflated_grid = list(self.obstacle_map.data)
+        
+        # Inflate each obstacle
+        for y in range(self.obstacle_map.info.height):
+            for x in range(self.obstacle_map.info.width):
+                index = y * self.obstacle_map.info.width + x
+                if self.obstacle_map.data[index] == 100:  # If cell is an obstacle
+                    # Inflate in a circle around the obstacle
+                    for dy in range(-inflation_cells, inflation_cells + 1):
+                        for dx in range(-inflation_cells, inflation_cells + 1):
+                            # Check if within inflation radius
+                            if dx*dx + dy*dy <= inflation_cells*inflation_cells:
+                                new_x = x + dx
+                                new_y = y + dy
+                                if (0 <= new_x < self.obstacle_map.info.width and 
+                                    0 <= new_y < self.obstacle_map.info.height):
+                                    new_index = new_y * self.obstacle_map.info.width + new_x
+                                    inflated_grid[new_index] = 100
+                                    
+        # Update the grid with inflated obstacles
+        self.obstacle_map.data = inflated_grid
+        
+    def update_obstacle_tracking(self, obstacles):
+        """Update obstacle tracking with new detections"""
+        current_time = self.get_clock().now()
+        
+        # Remove old obstacles
+        self.detected_obstacles = [
+            obs for obs in self.detected_obstacles
+            if (current_time - self.last_obstacle_time).nanoseconds / 1e9 < self.obstacle_memory_time
+        ]
+        
+        # Add new obstacles
+        for obs in obstacles:
+            if isinstance(obs, tuple):
+                x, y = obs
+                self.detected_obstacles.append((x, y, "unknown"))
+            
+        # Publish visualization
+        self.publish_obstacle_visualization()
+        
+    def publish_obstacle_visualization(self):
+        """Publish visualization markers for detected obstacles"""
+        marker_array = MarkerArray()
+        
+        # Create markers for different types of obstacles
+        for i, (x, y, obs_type) in enumerate(self.detected_obstacles):
+            marker = Marker()
+            marker.header.frame_id = self.map_frame_id
+            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.ns = "obstacles"
+            marker.id = i
+            marker.type = Marker.CYLINDER
+            marker.action = Marker.ADD
+            
+            marker.pose.position.x = x
+            marker.pose.position.y = y
+            marker.pose.position.z = 0.5
+            
+            marker.scale.x = self.obstacle_inflation_radius * 2
+            marker.scale.y = self.obstacle_inflation_radius * 2
+            marker.scale.z = 1.0
+            
+            # Color based on obstacle type
+            if obs_type == "dynamic":
+                marker.color.r = 1.0
+                marker.color.g = 0.0
+                marker.color.b = 0.0
+            else:
+                marker.color.r = 1.0
+                marker.color.g = 0.5
+                marker.color.b = 0.0
+            marker.color.a = 0.6
+            
+            marker_array.markers.append(marker)
+            
+        self.obstacle_viz_pub.publish(marker_array)
+
+    def _calc_path_following_cost(self, trajectory):
+        """Calculate cost based on how well the trajectory follows the path."""
+        if not trajectory or not self.waypoints:
+            return 0.0  # No cost if no trajectory or waypoints
+            
+        # Get end position of trajectory
+        end_x, end_y = trajectory[-1][0], trajectory[-1][1]
+        
+        # Find closest waypoint to end position
+        min_dist = float('inf')
+        closest_wp = None
+        
+        for wp in self.waypoints:
+            dist = np.hypot(wp['x'] - end_x, wp['y'] - end_y)
+            if dist < min_dist:
+                min_dist = dist
+                closest_wp = wp
+                
+        # If no waypoint found, return no cost
+        if closest_wp is None:
+            return 0.0
+            
+        # Calculate cost based on distance to closest waypoint
+        # Lower distance means better path following
+        path_cost = min_dist
+        
+        return path_cost
+
+    def _world_to_map(self, x, y):
+        """Convert world coordinates to map coordinates."""
+        map_x = int((x - self.map_origin_x) / self.map_resolution)
+        map_y = int((y - self.map_origin_y) / self.map_resolution)
+        return map_x, map_y
 
 
 def main(args=None):

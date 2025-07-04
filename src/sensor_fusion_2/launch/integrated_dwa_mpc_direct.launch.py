@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Launch file for integrated DWA-MPC direct pipeline.
-This launch file configures the system to use a direct pipeline from DWA to MPC to TCP,
-eliminating the DWA-MPC bridge component. It includes enhanced synchronization between
-DWA and MPC components for optimal trajectory handling.
+Launch file for MPC waypoint following.
+This launch file configures the system to use MPC to follow waypoints directly,
+with DWA planner disabled. This allows testing of the MPC controller's ability
+to follow waypoints without DWA's interference.
 
 Author: Claude
 """
@@ -32,10 +32,10 @@ def generate_launch_description():
     vehicle_frame = LaunchConfiguration('vehicle_frame', default='base_link')
     tcp_port = LaunchConfiguration('tcp_port', default='12344')
     tcp_host = LaunchConfiguration('tcp_host', default='127.0.0.1')
-    debug_level = LaunchConfiguration('debug_level', default='info')
+    debug_level = LaunchConfiguration('debug_level', default='debug')
     
     # Use a unified update rate for better synchronization
-    unified_rate = LaunchConfiguration('unified_rate', default='15.0')
+    unified_rate = LaunchConfiguration('unified_rate', default='20.0')
     
     # Declare LaunchArguments
     map_frame_arg = DeclareLaunchArgument(
@@ -64,16 +64,30 @@ def generate_launch_description():
     
     debug_level_arg = DeclareLaunchArgument(
         'debug_level',
-        default_value='info',
+        default_value='debug',
         description='Debug level (debug, info, warn, error)'
     )
     
     unified_rate_arg = DeclareLaunchArgument(
         'unified_rate',
-        default_value='15.0',
-        description='Unified update rate for DWA and MPC components'
+        default_value='20.0',
+        description='Unified update rate for MPC component'
     )
     
+    velocity_listener_node = Node(
+        package='sensor_fusion_2',
+        executable='velocity_listener',
+        name='velocity_listener',
+        parameters=[{
+            'tcp_ip': '0.0.0.0',
+            'tcp_port': 12346,
+            'velocity_topic': '/carla/ego_vehicle/velocity',
+            'velocity_vector_topic': '/carla/ego_vehicle/velocity_vector',
+            'publish_rate': 30.0,
+            'verbose_logging': False,
+        }],
+        output='screen'
+    )
     # Define the Enhanced DWA Planner node
     dwa_node = Node(
         package='sensor_fusion_2',
@@ -84,50 +98,82 @@ def generate_launch_description():
             'vehicle_frame_id': vehicle_frame,
             'waypoints_topic': '/carla/waypoints',
             'waypoint_markers_topic': '/carla/waypoint_markers',
-            'binary_map_topic': '/combined_binary_map',
-            'path_topic': '/dwa/path',  # Path for MPC to follow
-            'cmd_vel_topic': '/dwa/cmd_vel',  # Direct velocity commands
-            'parking_spots_topic': '/dwa/parking_spots',
-            'publish_rate': unified_rate,  # Use unified rate for synchronization
-            'max_speed': 25.0,
-            'min_speed': 0.0,  # Prevent negative speed for better motion
-            'max_yaw_rate': 0.6,  # Reduced from 0.8 to limit steering angle even more
-            'max_accel': 5.0,  # Reduced from 50.0 to allow smoother acceleration
-            'max_delta_yaw_rate': 0.3,  # Reduced from 0.4 for even smoother steering changes
-            'dt': 0.1,  # Keep shorter timestep for more precise paths
-            'predict_time': 3.0,  # Slightly reduced from 4.0 for better local planning
-            'to_goal_cost_gain': 1.0,  # Slightly reduced from 1.2 to balance with other costs
-            'speed_cost_gain': 0.8,  # Increased from 0.5 to prioritize maintaining speed
-            'obstacle_cost_gain': 8.0,  # Reduced from 10.0 to be less sensitive to distant obstacles
-            'path_following_gain': 0.8,  # Significantly increased to prioritize waypoint following
-            'lookahead_distance': 8.0,  # Reduced from 10.0 for more responsive control
-            'obstacle_threshold': 150,
-            'safe_distance': 3.0,  # Reduced from 5.0 to be less conservative
+            'binary_map_topic': '/combined_binary_map',  # Combined map with obstacles (black) and lanes (grey)
+            'path_topic': '/dwa/path',
+            'cmd_vel_topic': '/dwa/cmd_vel',
+            'publish_rate': unified_rate,
+            # Debug and logging settings
+            'debug_level': 'debug',  # Force debug level for this node
+            'verbose_logging': True,  # Enable verbose logging
+            'log_map_processing': True,  # Log details about map processing
+            'log_obstacle_detection': True,  # Log details about obstacle detection
+            'log_path_planning': True,  # Log details about path planning
+            'publish_debug_images': True,  # Publish debug images
+            'publish_debug_markers': True,  # Publish debug markers
+            'diagnostic_level': 2,  # Maximum diagnostic level
+            # Enhanced parameters for better integration with MPC
+            'max_speed': 30.0,  # Reduced from 50.0 to 30.0 to better match MPC's max speed
+            'min_speed': 0.0,
+            'max_yaw_rate': 0.5,  # Increased for better heading control
+            'max_accel': 8.0,  # Increased for faster acceleration
+            'max_delta_yaw_rate': 0.3,  # Increased for more responsive heading changes
+            'dt': 0.1,
+            'predict_time': 2.5,  # Reduced for more frequent heading updates
+            'to_goal_cost_gain': 1.5,  # Adjusted for better balance
+            'speed_cost_gain': 0.2,  # Reduced to prioritize obstacle avoidance
+            'obstacle_cost_gain': 25.0,  # Further increased for stronger obstacle avoidance
+            'path_following_gain': 15.0,  # Adjusted for better path following
+            'lookahead_distance': 10.0,  # Reduced for tighter heading control
+            'obstacle_threshold': 30,  # Significantly lowered threshold for black obstacle detection (black is close to 0)
+            'safe_distance': 6.0,  # Increased safety margin
             'default_lane_width': 3.2,
-            'lane_width_factor': 0.6,
-            'start_point_offset': 0.8,
-            'min_obstacle_distance': 3.0,  # Reduced from 5.0 to be less conservative
-            'path_smoothing_factor': 0.8,  # Higher smoothing for better MPC following
-            'lateral_safety_margin': 1.0,
-            'use_lane_based_obstacles': True,
-            'ignore_obstacles_outside_lane': False,  # Detect all obstacles
-            'strict_lane_obstacle_detection': True,
-            'obstacle_influence_radius': 2.5,  # Reduced from 3.0 for more precise obstacle detection
-            'obstacle_detection_range': 25.0,  # Reduced from 30.0 to focus on closer obstacles
-            'obstacle_weight_decay': 0.7,
-            'dynamic_obstacle_prediction': True,
+            'lane_width_factor': 0.9,  # Increased for wider lane consideration
+            'start_point_offset': 0.3,  # Reduced to start turns earlier
+            'min_obstacle_distance': 2.0,  # Increased minimum distance to obstacles
+            'path_smoothing_factor': 0.5,  # Reduced for more precise path following
+            'lateral_safety_margin': 1.8,  # Increased lateral safety margin
+            'obstacle_weight_decay': 0.1,  # Adjusted decay for stronger close-range avoidance
             'adaptive_lookahead': True,
             'emergency_stop_enabled': True,
-            'emergency_brake_distance': 5.0,  # Reduced from 8.0 to only stop for closer obstacles
+            'emergency_brake_distance': 8.0,  # Increased emergency brake distance
             'obstacle_path_pruning': True,
-            'obstacle_velocity_factor': 1.5,
-            'min_obstacle_count': 2,  # Reduced from 3 to be more sensitive to real obstacles
-            'debug_level': debug_level,
+            # Enhanced parameters for black obstacles on gray lanes
+            'lane_obstacle_detection_enabled': True,  # Enable specific detection of obstacles crossing lanes
+            'lane_obstacle_threshold': 0,  # Lower threshold for detecting black obstacles (black is close to 0)
+            'lane_gray_min_threshold': 50,  # Minimum gray value to be considered a lane
+            'lane_gray_max_threshold': 200,  # Maximum gray value to be considered a lane
+            'lane_width_for_obstacles': 4.0,  # Width of lane to check for obstacles (meters)
+            'lane_obstacle_min_area': 30,  # Minimum area of obstacle pixels to consider
+            'lane_obstacle_stop_distance': 20.0,  # Distance to start stopping when lane obstacle detected
+            'lane_obstacle_slow_distance': 25.0,  # Distance to start slowing down when lane obstacle detected
+            # Black lane detection parameters (for different purpose than black obstacles)
+            'black_lane_detection_enabled': True,  # Enable black lane detection
+            'black_lane_threshold': 0,  # Lower threshold for detecting black lanes (0-255)
+            'black_lane_min_area': 10,  # Minimum area of black pixels to consider as a lane
+            'black_lane_stop_distance': 20.0,  # Distance to start stopping when black lane detected
+            'black_lane_slow_distance': 25.0,  # Distance to start slowing down when black lane detected
+            'min_cmd_vel_for_stop': 0.3,  # Lower velocity to send when stopping (for more immediate stops)
+            # Waypoint crossing obstacle parameters
+            'waypoint_obstacle_check_enabled': True,  # Enable checking if obstacles cross waypoints
+            'waypoint_corridor_width': 3.5,  # Width of corridor around waypoints to check for obstacles
+            'waypoint_obstacle_lookahead': 20.0,  # How far ahead to check waypoints for obstacles
+            'waypoint_obstacle_threshold': 30,  # Lower threshold for detecting black obstacles on waypoint path
+            'waypoint_obstacle_stop_command': True,  # Send stop command when obstacle crosses waypoints
+            # Color-specific detection
+            'color_detection_enabled': True,  # Enable color-specific detection
+            'black_obstacle_max_value': 50,  # Maximum pixel value to be considered black (obstacles)
+            'gray_lane_min_value': 100,  # Minimum pixel value to be considered gray (lanes)
+            'gray_lane_max_value': 200,  # Maximum pixel value to be considered gray (lanes)
+            'contrast_enhancement_enabled': True,  # Enable contrast enhancement for better detection
+            # Map subscription parameters
+            'map_subscription_qos': 'reliable_transient',  # Use reliable and transient local QoS for map subscription
+            'map_subscription_timeout': 60.0,  # Wait up to 60 seconds for map data
+            'map_subscription_retry_interval': 2.0,  # Retry every 2 seconds
         }],
         output='screen'
     )
     
-    # Define the MPC Controller node with improved synchronization with DWA
+    # Define the MPC Controller node configured for direct waypoint following
     mpc_node = Node(
         package='sensor_fusion_2',
         executable='mpc_controller',
@@ -136,55 +182,67 @@ def generate_launch_description():
             'vehicle_frame_id': vehicle_frame,
             'map_frame_id': map_frame,
             'cmd_vel_topic': '/mpc/cmd_vel',
-            'dwa_cmd_vel_topic': '/dwa/cmd_vel',  
-            'path_topic': '/dwa/path',  # Match with DWA planner
-            'obstacle_detected_topic': '/dwa/obstacle_detected',
-            'direct_dwa_connection': True,  # Enable direct connection to DWA
-            'bypass_trajectory_receiver': True,  # Skip trajectory_receiver
+            # Enable DWA connections for obstacle detection
+            'direct_dwa_connection': True,
+            'dwa_cmd_vel_topic': '/dwa/cmd_vel',
+            'bypass_trajectory_receiver': True,
+            # Configure for direct waypoint following
+            'use_waypoints': True,
+            'waypoints_topic': '/carla/waypoints',
+            'path_topic': '/dwa/path',
             'tcp_port': tcp_port,
             'tcp_host': tcp_host,
-            'update_rate': unified_rate,  # Use unified rate for synchronization
-            'prediction_horizon': 20,
-            'control_horizon': 8,
-            'dt': 0.1,  # Match with DWA dt for better sync
-            'max_speed': 25.0,
-            'max_acceleration': 2.0,  # Increased from 1.0 for more responsive acceleration
-            'max_deceleration': 2.0,  # Increased from 1.0 for stronger braking when needed
+            'update_rate': 60.0,  # Increased from 50.0 to 60.0 for even more responsive control
+            'prediction_horizon': 8,  # Maintained at 8 which is a good balance
+            'control_horizon': 2,   # Maintained at 2 for immediate control
+            'dt': 0.1,
+            'max_speed': 20.0,  # Maximum speed in m/s
+            'min_speed': 0.0,
+            'max_yaw_rate': 4.0,  # Increased from 3.0 to 4.0 for even more responsive turns
+            'max_accel': 10.0,  # Increased from 10.0 to 20.0 to match controller settings
+            'max_deceleration': 5.0,
             'min_deceleration': 0.05,
-            'max_steering_angle': 0.6,  # Match with DWA max_yaw_rate
-            'max_steering_rate': 0.3,  # Reduced from 0.4 to match DWA's max_delta_yaw_rate
+            'max_steering_angle': 0.9,  # Increased from 0.8 to 0.9 for even tighter turns
+            'max_steering_rate': 0.6,  # Increased from 0.4 to 0.6 for much faster steering response
             'wheelbase': 2.8,
-            'position_weight': 1.0,
-            'heading_weight': 0.8,
-            'velocity_weight': 0.8,  # Slightly reduced from 1.0 to allow for obstacle response
-            'steering_weight': 0.25,
-            'acceleration_weight': 0.3,
-            'deceleration_weight': 0.3,  # Increased from 0.2 to encourage smoother braking
-            'jerk_weight': 0.08,
-            'steering_rate_weight': 0.3,
-            'brake_smoothness_weight': 0.5,
+            'position_weight': 5.0,  # Maintained at 5.0
+            'heading_weight': 300.0,  # Dramatically increased from 20.0 to 300.0 to match controller settings
+            'velocity_weight': 0.05,  # Maintained at 0.05
+            'steering_weight': 0.2,  # Reduced from 0.5 to 0.2 to match controller settings
+            'acceleration_weight': 0.05,
+            'deceleration_weight': 0.05,
+            'jerk_weight': 0.05,  # Maintained at 0.05
+            'steering_rate_weight': 0.05,  # Reduced from 0.1 to 0.05 for even more aggressive steering changes
+            'brake_smoothness_weight': 0.2,  # Reduced from 0.3 to 0.2
             'min_velocity': 0.0,
             'stop_threshold': 0.1,
             'deceleration_profile': 'smooth',
             'brake_transition_threshold': 0.2,
             'reconnect_interval': 1.0,
             'max_reconnect_attempts': 10,
-            'use_waypoints': True,  # We're using DWA path instead
             'test_mode': False,
             'debug_level': debug_level,
-            'progressive_braking': True,
-            'prevent_unnecessary_stops': True,  # Enable to maintain forward motion when possible
-            'maintain_continuous_motion': True,  # Enable to ensure vehicle keeps moving
-            'respect_obstacle_detection': True,  # Enable to properly respond to obstacle detection
-            'emergency_stop_distance': 2.5,  # Reduced from 3.0 to only stop for very close obstacles
-            'obstacle_stop_threshold': 0.1,  # Balanced value for obstacle detection
-            'strict_path_following': True,  # Enable strict path following for better waypoint tracking
-            'hard_brake_on_obstacle': True,  # Enable hard braking for obstacles
-            'obstacle_reaction_factor': 1.5,  # Reduced from 2.0 for more balanced reactions
-            'dwa_path_priority': True,  # Always prioritize DWA paths
-            'min_path_points': 3,  # Minimum points for a valid path
-            'path_update_timeout': 0.5,  # Reduced for fresher paths
-            'default_speed': 5.0,  # Increased default speed for when no valid trajectory is available
+            'min_path_points': 2,
+            'path_update_timeout': 2.0,
+            'velocity_topic': '/carla/ego_vehicle/velocity',
+            'fallback_throttle': 0.9,  # Increased from 0.8 to 0.9 for higher default speed
+            # IMU integration parameters
+            'use_imu': True,  # Enable IMU integration
+            'imu_topic': '/carla/ego_vehicle/imu',  # Updated to use CARLA's IMU topic
+            'imu_angular_velocity_weight': 2.0,  # Weight for IMU angular velocity
+            'imu_linear_acceleration_weight': 1.0,  # Weight for IMU linear acceleration
+            # Parameters for obstacle detection via DWA
+            'curve_detection_threshold': 3.0,  # Threshold in degrees for curve detection
+            'min_throttle': 0.1,  # Minimum throttle during gradual stop
+            'max_throttle': 0.8,  # Maximum throttle on straight segments
+            'max_steering': 0.8,  # Maximum steering value
+            'dwa_stop_threshold': 0.3,  # Lowered from 0.5 to 0.3 to match DWA's min_cmd_vel_for_stop
+            # Enhanced parameters for responding to DWA obstacle detection
+            'emergency_brake_force': 0.9,  # Strong brake force when obstacle detected
+            'obstacle_stop_timeout': 3.0,  # How long to remain stopped after obstacle detection (seconds)
+            'obstacle_resume_threshold': 0.5,  # Speed to resume after obstacle is cleared
+            'prioritize_dwa_commands': True,  # Always prioritize DWA commands for safety
+            'waypoint_obstacle_response': True,  # Enable specific response to obstacles on waypoint lane
         }],
         output='screen'
     )
@@ -203,8 +261,13 @@ def generate_launch_description():
     # Add the included launch file
     ld.add_action(costmap_waypoints_launch)
     
-    # Add the nodes
+    # Add velocity listener node
+    ld.add_action(velocity_listener_node)
+    
+    # Add DWA node first to ensure it starts before MPC
     ld.add_action(dwa_node)
+    
+    # Add the MPC node after DWA
     ld.add_action(mpc_node)
     
     return ld 

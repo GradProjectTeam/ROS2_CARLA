@@ -37,6 +37,7 @@ setup(
             'trajectory_mpc = ' + package_name + '.trajectory_mpc_entry_point:main',
             'enhanced_dwa_planner_node = ' + package_name + '.enhanced_dwa_planner_node:main',
             'dwa_mpc_bridge = ' + package_name + '.dwa_mpc_bridge:main',
+            'velocity_listener = ' + package_name + '.velocity_listener:main',
         ],
     },
 )
