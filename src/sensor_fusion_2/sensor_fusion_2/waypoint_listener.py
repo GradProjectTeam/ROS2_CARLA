@@ -269,10 +269,10 @@ class WaypointListener(Node):
                 if self.verbose_logging:
                     self.get_logger().info(f"Receiving {num_waypoints} waypoints")
                 
-                # Each waypoint has: x, y, z, road_id, lane_id, lane_type (6 values)
+                # Each waypoint has: x, y, z, road_id, lane_id, lane_type, has_right_lane (7 values)
                 # Each value is a float (4 bytes) or int (4 bytes)
-                # So each waypoint is 24 bytes
-                expected_bytes = num_waypoints * 24
+                # So each waypoint is 28 bytes
+                expected_bytes = num_waypoints * 28
                 
                 # Receive all waypoint data
                 waypoint_data = bytearray()
@@ -290,16 +290,17 @@ class WaypointListener(Node):
                     # Process the waypoint data
                     waypoints = []
                     for i in range(num_waypoints):
-                        offset = i * 24
-                        # Unpack x, y, z (floats) and road_id, lane_id, lane_type (ints)
-                        x, y, z, road_id, lane_id, lane_type = struct.unpack('!fffiii', waypoint_data[offset:offset+24])
+                        offset = i * 28
+                        # Unpack x, y, z (floats) and road_id, lane_id, lane_type, has_right_lane (ints)
+                        x, y, z, road_id, lane_id, lane_type, has_right_lane = struct.unpack('!fffiiii', waypoint_data[offset:offset+28])
                         waypoints.append({
                             'x': x,
                             'y': y,
                             'z': z,
                             'road_id': road_id,
                             'lane_id': lane_id,
-                            'lane_type': lane_type
+                            'lane_type': lane_type,
+                            'has_right_lane': has_right_lane
                         })
                         # # save waypoints to a file
                         # with open('waypoints.txt', 'a') as f:
@@ -397,6 +398,7 @@ class WaypointListener(Node):
             metadata_values.append(wp['road_id'])
             metadata_values.append(wp['lane_id'])
             metadata_values.append(wp['lane_type'])
+            metadata_values.append(wp['has_right_lane'])
         
         # Set metadata values
         metadata.data = metadata_values

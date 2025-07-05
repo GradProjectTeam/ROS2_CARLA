@@ -120,6 +120,21 @@ Visualization Manager:
       Value: true
       Reference Frame: map
     
+    # Velocity Visualization
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Velocity
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /velocity_visualization
+      Value: true
+      Reference Frame: base_link
+    
     # Waypoint Map
     - Alpha: 0.7
       Class: rviz_default_plugins/Map

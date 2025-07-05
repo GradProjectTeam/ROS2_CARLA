@@ -88,6 +88,24 @@ def generate_launch_description():
         }],
         output='screen'
     )
+    
+    # Add velocity visualizer node
+    velocity_visualizer_node = Node(
+        package='sensor_fusion_2',
+        executable='velocity_visualizer',
+        name='velocity_visualizer',
+        parameters=[{
+            'input_topic': 'vehicle_velocity',
+            'output_topic': 'velocity_visualization',
+            'frame_id': vehicle_frame,
+            'scale_factor': 1.0,
+            'arrow_shaft_diameter': 0.05,
+            'arrow_head_diameter': 0.1,
+            'max_velocity': 10.0
+        }],
+        output='screen'
+    )
+    
     # Define the Enhanced DWA Planner node
     dwa_node = Node(
         package='sensor_fusion_2',
@@ -263,6 +281,9 @@ def generate_launch_description():
     
     # Add velocity listener node
     ld.add_action(velocity_listener_node)
+    
+    # Add velocity visualizer node
+    ld.add_action(velocity_visualizer_node)
     
     # Add DWA node first to ensure it starts before MPC
     ld.add_action(dwa_node)
