@@ -48,8 +48,8 @@ class BinaryMapCombiner(Node):
         
         # Add new parameters for unified map functionality
         self.declare_parameter('save_combined_map', True)
-        # self.declare_parameter('save_directory', '/home/shishtawy/Documents/ROS2/maps/NewMaps')
-        self.declare_parameter('save_directory', '/home/mostafa/GP/ROS2/maps/NewMaps')
+        self.declare_parameter('save_directory', '/home/shishtawy/Documents/ROS2/maps/NewMaps')
+        # self.declare_parameter('save_directory', '/home/mostafa/GP/ROS2/maps/NewMaps')
         self.declare_parameter('save_interval', 5.0)  # seconds
         self.declare_parameter('map_name_prefix', 'unified_map_')
         self.declare_parameter('add_timestamp_to_filename', True)

@@ -14,6 +14,7 @@ import time
 import threading
 import numpy as np
 from queue import Queue, Empty
+import os
 
 import rclpy
 from rclpy.node import Node
@@ -26,6 +27,13 @@ from builtin_interfaces.msg import Duration
 class WaypointListener(Node):
     def __init__(self):
         super().__init__('waypoint_listener')
+        
+        # Debug counters
+        self.waypoints_received = 0
+        self.waypoints_written = 0
+        self.file_write_attempts = 0
+        self.file_write_failures = 0
+        self.last_waypoint_data = None
         
         # Declare parameters
         self.declare_parameter('tcp_ip', '127.0.0.1')  # Listen on all interfaces
@@ -162,6 +170,9 @@ class WaypointListener(Node):
         
         # Create a timer for status updates
         self.status_timer = self.create_timer(5.0, self.log_status)
+        
+        # Create a timer for file check
+        self.file_check_timer = self.create_timer(10.0, self.check_waypoints_file)
         
         self.get_logger().info("Waypoint listener initialized and waiting for connections")
         
@@ -619,27 +630,27 @@ class WaypointListener(Node):
                 color.r = 0.0
                 color.g = 1.0
                 color.b = 0.0
-            elif lane_type == 2:  # Stop
+            elif lane_type == "Stop":  # Stop
                 color.r = 1.0
                 color.g = 0.0
                 color.b = 0.0
-            elif lane_type == 3:  # Shoulder
+            elif lane_type == "Shoulder":  # Shoulder
                 color.r = 1.0
                 color.g = 1.0
                 color.b = 0.0
-            elif lane_type == 4:  # Biking
+            elif lane_type == "Biking":  # Biking
                 color.r = 0.0
                 color.g = 0.0
                 color.b = 1.0
-            elif lane_type == 5:  # Sidewalk
+            elif lane_type == "Sidewalk":  # Sidewalk
                 color.r = 1.0
                 color.g = 0.0
                 color.b = 1.0
-            elif lane_type == 6:  # Border
+            elif lane_type == "Border":  # Border
                 color.r = 0.5
                 color.g = 0.5
                 color.b = 0.5
-            elif lane_type == 7:  # Restricted
+            elif lane_type == "Restricted":  # Restricted
                 color.r = 1.0
                 color.g = 0.5
                 color.b = 0.0
@@ -807,10 +818,115 @@ class WaypointListener(Node):
                 self.get_logger().info(f"Connected to client: {self.client_address}")
             else:
                 self.get_logger().info("Waiting for client connection")
+                
+        # Log debug counters
+        self.get_logger().info(f"Debug counters: received={self.waypoints_received}, written={self.waypoints_written}, " +
+                              f"attempts={self.file_write_attempts}, failures={self.file_write_failures}")
+        
+        # Log last waypoint data if available
+        if self.last_waypoint_data:
+            self.get_logger().info(f"Last waypoint data: {self.last_waypoint_data}")
+    
+    def check_waypoints_file(self):
+        """Check if waypoints file exists and has content"""
+        try:
+            # Check if file exists
+            if os.path.exists(self.waypoints_file):
+                # Get file size
+                file_size = os.path.getsize(self.waypoints_file)
+                # Get line count
+                with open(self.waypoints_file, 'r') as f:
+                    lines = f.readlines()
+                
+                self.get_logger().info(f"Waypoints file check: exists={True}, size={file_size} bytes, lines={len(lines)}")
+                
+                # Print the last few lines if there are any data lines
+                data_lines = [line for line in lines if not line.startswith('#')]
+                if data_lines:
+                    self.get_logger().info(f"Last waypoint data: {data_lines[-1].strip()}")
+                else:
+                    self.get_logger().warn("No waypoint data in file, only header lines")
+            else:
+                self.get_logger().error(f"Waypoints file does not exist: {self.waypoints_file}")
+                
+                # Try to recreate the file
+                self.init_waypoints_file()
+        except Exception as e:
+            self.get_logger().error(f"Error checking waypoints file: {e}")
+            
+        # Also check emergency file
+        try:
+            emergency_file = "/tmp/emergency_waypoints.txt"
+            if os.path.exists(emergency_file):
+                file_size = os.path.getsize(emergency_file)
+                self.get_logger().info(f"Emergency file check: exists={True}, size={file_size} bytes")
+        except Exception as e:
+            self.get_logger().error(f"Error checking emergency file: {e}")
+        
+        # Log debug counters
+        self.get_logger().info(f"Debug counters: received={self.waypoints_received}, written={self.waypoints_written}, " +
+                              f"attempts={self.file_write_attempts}, failures={self.file_write_failures}")
+        
+        # Try to write a timestamp marker to the file
+        try:
+            marker = f"# TIMESTAMP MARKER: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            if self.waypoint_file_handle:
+                self.waypoint_file_handle.write(marker)
+                self.waypoint_file_handle.flush()
+                self.get_logger().info(f"Wrote timestamp marker to file")
+            else:
+                with open(self.waypoints_file, 'a') as f:
+                    f.write(marker)
+                    f.flush()
+                self.get_logger().info(f"Wrote timestamp marker to file (fallback method)")
+        except Exception as e:
+            self.get_logger().error(f"Failed to write timestamp marker: {e}")
+    
+    def init_waypoints_file(self):
+        """Initialize the waypoints file with a header"""
+        try:
+            # Create the file with write mode (overwrites existing file)
+            with open(self.waypoints_file, 'w') as f:
+                f.write("# x, y, z, road_id, lane_id, lane_type\n")
+                f.write("# " + "-" * 60 + "\n")
+                f.write(f"# File initialized at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("# DO NOT DELETE THIS FILE - It contains waypoint data\n")
+                f.flush()
+                os.fsync(f.fileno())  # Force OS to write to disk
+            self.get_logger().info(f"Initialized waypoints file at {self.waypoints_file}")
+            
+            # Verify file exists and is readable
+            with open(self.waypoints_file, 'r') as f:
+                lines = f.readlines()
+                self.get_logger().info(f"Waypoints file contains {len(lines)} lines")
+                
+        except Exception as e:
+            self.get_logger().error(f"Error initializing waypoints file: {e}")
+            
+            # Try alternative location
+            try:
+                alt_file = "/tmp/waypoints_fallback.txt"
+                with open(alt_file, 'w') as f:
+                    f.write("# Fallback waypoints file\n")
+                    f.write(f"# File initialized at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.flush()
+                    os.fsync(f.fileno())  # Force OS to write to disk
+                self.waypoints_file = alt_file
+                self.get_logger().info(f"Using alternative waypoints file: {alt_file}")
+            except Exception as e2:
+                self.get_logger().error(f"Failed to create alternative waypoints file: {e2}")
     
     def destroy_node(self):
         """Clean up resources when the node is shut down"""
         self.running = False
+        
+        # Close waypoint file handle
+        if self.waypoint_file_handle:
+            try:
+                self.waypoint_file_handle.close()
+                self.get_logger().info("Closed waypoints file")
+            except Exception as e:
+                self.get_logger().error(f"Error closing waypoints file: {e}")
         
         with self.connection_lock:
             if self.client_socket:

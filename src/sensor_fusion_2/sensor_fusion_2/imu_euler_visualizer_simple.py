@@ -482,19 +482,20 @@ class ImuEulerVisualizer(Node):
             imu_msg.orientation = Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])  # Set orientation
             
             # Set orientation covariance (confidence in measurement)
-            imu_msg.orientation_covariance = [0.01, 0, 0, 0, 0.01, 0, 0, 0, 0.01]  # Low uncertainty
+            # Make sure this is exactly 9 float values
+            imu_msg.orientation_covariance = np.array([0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.01], dtype=np.float64)  # Low uncertainty
             
             # Set angular velocity
             imu_msg.angular_velocity = Vector3(x=gyro_x, y=gyro_y, z=gyro_z)  # Gyroscope data
             
             # Set angular velocity covariance
-            imu_msg.angular_velocity_covariance = [0.01, 0, 0, 0, 0.01, 0, 0, 0, 0.01]  # Low uncertainty
+            imu_msg.angular_velocity_covariance = np.array([0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.01], dtype=np.float64)  # Low uncertainty
             
             # Set linear acceleration
             imu_msg.linear_acceleration = Vector3(x=accel_x, y=accel_y, z=accel_z)  # Accelerometer data
             
             # Set linear acceleration covariance
-            imu_msg.linear_acceleration_covariance = [0.01, 0, 0, 0, 0.01, 0, 0, 0, 0.01]  # Low uncertainty
+            imu_msg.linear_acceleration_covariance = np.array([0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.01], dtype=np.float64)  # Low uncertainty
             
             # Publish IMU message
             self.imu_publisher.publish(imu_msg)                           # Send to ROS
