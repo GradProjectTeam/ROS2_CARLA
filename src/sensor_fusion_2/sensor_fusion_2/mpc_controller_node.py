@@ -16,6 +16,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 from nav_msgs.msg import Path
 from tf2_ros import Buffer, TransformListener
 from sensor_msgs.msg import Imu  # Added IMU import
+import tf2_ros
 
 # Remove external import
 # from sensor_fusion_2.sensor_fusion_2.Control_standalone_mpc_controller import MPCController
@@ -73,27 +74,28 @@ class VehicleModel:
 
 # Rename to avoid name conflict with the Node class
 class MPCControllerImpl:
-    def __init__(self, horizon=15, dt=0.1):
+    def __init__(self, horizon=8, dt=0.02):  # Match DWA's horizon and time step
         """
         Initialize the MPC controller
         Args:
-            horizon: Prediction horizon
-            dt: Time step [s]
+            horizon: Prediction horizon (matches DWA's lookahead)
+            dt: Time step [s] (matches DWA's dt)
         """
         self.horizon = horizon
         self.dt = dt
         self.vehicle = VehicleModel()
 
-        # Control limits for Tesla Model 3
-        self.max_acc = 20.0  # Increased from 15.0 to 20.0 m/s^2 for even higher acceleration
-        self.max_steer = np.deg2rad(50)  # Increased from 45 to 50 degrees for even more aggressive steering
+        # Control limits - matched with DWA
+        self.max_acc = 5.0  # Maximum acceleration (m/s^2)
+        self.min_acc = -5.0  # Minimum acceleration (m/s^2)
+        self.max_steer = np.deg2rad(17.2)  # Maximum steering angle (rad) - ~0.3 rad
+        self.min_steer = -np.deg2rad(17.2)  # Minimum steering angle (rad)
+        self.steer_norm_factor = 1.0 / self.max_steer  # For normalizing steering
         
-        # Steering normalization factor (to convert from radians to normalized [-1,1])
-        self.steer_norm_factor = 0.9  # Increased from 0.8 to 0.9 for even more responsive steering
-
-        # Cost function weights - dramatically increased heading weight to force curve following
-        self.Q = np.diag([20, 20, 300, 1, 1, 15])  # Dramatically increased heading weight (index 2) from 200 to 300, and omega weight from 10 to 15
-        self.R = np.diag([0.2, 0.8])  # Further reduced steering weight from 1.0 to 0.8 and acceleration weight from 0.3 to 0.2 for more aggressive control
+        # Cost function weights - tuned for smooth control
+        self.Q = np.diag([20.0, 20.0, 15.0, 8.0, 8.0, 5.0])  # State weights (x, y, psi, vx, vy, omega)
+        self.R = np.diag([1.2, 2.0])  # Control weights (acc, steer)
+        self.R_delta = np.diag([0.8, 1.5])  # Control rate weights
 
         self.prev_control = np.zeros(2)
         self.prev_steering = 0.0  # Store previous steering for smoothing
@@ -279,24 +281,37 @@ class MPCControllerImpl:
                 while heading_error < -np.pi:
                     heading_error += 2 * np.pi
                     
-                # Calculate steering based on heading error and distance - MORE AGGRESSIVE
+                # Calculate steering based on heading error and distance - LESS AGGRESSIVE
                 distance = np.sqrt(dx*dx + dy*dy)
-                # Increase steering response for sharper turns
-                steering_rad = np.clip(heading_error * (1.5 + 2.0/max(0.1, distance)), -self.max_steer, self.max_steer)  # Increased from 1.2 + 1.5/distance to 1.5 + 2.0/distance
+                # Reduce steering response for smoother control
+                steering_rad = np.clip(heading_error * (1.0 + 1.0/max(0.1, distance)), -self.max_steer, self.max_steer)  # Reduced from 1.5 + 2.0/distance to 1.0 + 1.0/distance
                 
                 # Apply the steering
                 steering = self.normalize_steering(steering_rad)
                 print(f"Using enhanced fallback control: {steering}")
-                optimal_control = np.array([0.5, steering_rad])  # Increased from 0.3 to 0.5 for higher acceleration with calculated steering
+                optimal_control = np.array([0.3, steering_rad])  # Reduced from 0.5 to 0.3 for smoother acceleration with calculated steering
 
             # Process the control outputs
             acceleration = np.clip(optimal_control[0] / self.max_acc, -1, 1)
             steering_rad = optimal_control[1]
             steering = self.normalize_steering(steering_rad)
             
-            # For higher speeds, use more aggressive acceleration and gentler braking
-            brake = max(0, -acceleration * 0.5) if acceleration < 0 else 0.0  # Reduced from 0.7 to 0.5 for gentler braking
-            acceleration = max(0, acceleration * 1.5)  # Increased from 1.2 to 1.5 for even more aggressive acceleration
+            # Improved throttle-brake transition logic
+            # Use a deadzone to prevent oscillation between throttle and brake
+            if -0.1 < acceleration < 0.1:  # Increased deadzone from -0.05 to 0.05 to 0.1
+                # In the deadzone, maintain current speed (no acceleration or braking)
+                acceleration = 0.0
+                brake = 0.0
+            elif acceleration < 0:
+                # For negative acceleration (deceleration), apply proportional braking
+                # Use a gentler braking profile to avoid sudden stops
+                brake = max(0, -acceleration * 0.7)  # Reduced from 0.8 to 0.7 for gentler braking
+                acceleration = 0.0
+            else:
+                # For positive acceleration, apply progressive throttle
+                # Apply a more gradual acceleration curve
+                acceleration = max(0, acceleration * 0.8)  # Reduced from 1.5 to 0.8 for gentler acceleration
+                brake = 0.0
 
             self.prev_control = optimal_control
 
@@ -309,7 +324,7 @@ class MPCControllerImpl:
         except Exception as e:
             print(f"Error in MPC control: {str(e)}")
             return {
-                'acceleration': 0.5,  # Increased from 0.2 to 0.5 for higher acceleration as fallback
+                'acceleration': 0.3,  # Reduced from 0.5 to 0.3 for smoother acceleration as fallback
                 'steering': 0.0,
                 'brake': 0.0
             }
@@ -341,25 +356,37 @@ class MPCController(Node):
         self.declare_parameter('obstacle_detected_topic', '/dwa/obstacle_detected')
         self.declare_parameter('direct_dwa_connection', True)
         self.declare_parameter('bypass_trajectory_receiver', True)  # Default to True since we use path directly
-        self.declare_parameter('min_path_points', 2)  # Minimum number of points to consider a valid path
+        self.declare_parameter('min_path_points', 5)  # Minimum number of points to consider a valid path
         self.declare_parameter('path_update_timeout', 2.0)  # Path is considered stale after this many seconds
         self.declare_parameter('velocity_topic', '/carla/ego_vehicle/velocity')
         self.declare_parameter('vehicle_frame_id', 'base_link')
-        self.declare_parameter('map_frame_id', 'local_map_link')
+        self.declare_parameter('map_frame_id', 'map')
         self.declare_parameter('fallback_throttle', 0.9)  # Default throttle when no path is available
         self.declare_parameter('use_imu', True)  # Enable IMU integration by default
         self.declare_parameter('imu_topic', '/carla/ego_vehicle/imu')
         self.declare_parameter('max_speed', 20.0)  # Maximum speed in m/s
-        self.declare_parameter('curve_detection_threshold', 3.0)  # Threshold in degrees for curve detection
+        self.declare_parameter('curve_detection_threshold', 50.0)  # Threshold in degrees for curve detection
         self.declare_parameter('min_throttle', 0.1)  # Minimum throttle during gradual stop
-        self.declare_parameter('max_throttle', 0.8)  # Maximum throttle on straight segments
-        self.declare_parameter('max_steering', 0.9)  # Maximum steering value
+        self.declare_parameter('max_throttle', 0.6)  # Maximum throttle on straight segments
+        self.declare_parameter('max_steering', 0.5)  # Maximum steering value
         self.declare_parameter('dwa_stop_threshold', 0.3)  # Threshold for detecting DWA stop command
         self.declare_parameter('emergency_brake_force', 0.9)  # Strong brake force when obstacle detected
         self.declare_parameter('obstacle_stop_timeout', 3.0)  # How long to remain stopped after obstacle detection
         self.declare_parameter('obstacle_resume_threshold', 0.5)  # Speed to resume after obstacle is cleared
         self.declare_parameter('prioritize_dwa_commands', True)  # Always prioritize DWA commands for safety
         self.declare_parameter('waypoint_obstacle_response', True)  # Enable specific response to obstacles on waypoint lane
+        
+        # Add parking-related parameters
+        self.declare_parameter('parking_detection_distance', 5.0)  # Distance to detect parking lane
+        self.declare_parameter('parking_brake_initial', 0.4)  # Initial brake force when parking detected
+        self.declare_parameter('parking_brake_final', 0.8)  # Final brake force for complete stop
+        self.declare_parameter('parking_stop_duration', 2.0)  # Duration of parking stop sequence
+        
+        # Declare new smoothing parameters
+        self.declare_parameter('steering_smoothing_factor', 0.3)  # Smoothing factor for steering (30% new, 70% previous)
+        self.declare_parameter('throttle_smoothing_factor', 0.3)  # Smoothing factor for throttle (30% new, 70% previous)
+        self.declare_parameter('brake_smoothing_factor', 0.3)  # Smoothing factor for brake (30% new, 70% previous)
+        self.declare_parameter('brake_transition_threshold', 0.3)  # Threshold for throttle-brake transitions
         
         # Get parameters
         self.tcp_port = self.get_parameter('tcp_port').value
@@ -399,6 +426,18 @@ class MPCController(Node):
         self.prioritize_dwa_commands = self.get_parameter('prioritize_dwa_commands').value
         self.waypoint_obstacle_response = self.get_parameter('waypoint_obstacle_response').value
         
+        # Get parking parameters
+        self.parking_detection_distance = self.get_parameter('parking_detection_distance').value
+        self.parking_brake_initial = self.get_parameter('parking_brake_initial').value
+        self.parking_brake_final = self.get_parameter('parking_brake_final').value
+        self.parking_stop_duration = self.get_parameter('parking_stop_duration').value
+        
+        # Get new smoothing parameters
+        self.steering_smoothing_factor = self.get_parameter('steering_smoothing_factor').value
+        self.throttle_smoothing_factor = self.get_parameter('throttle_smoothing_factor').value
+        self.brake_smoothing_factor = self.get_parameter('brake_smoothing_factor').value
+        self.brake_transition_threshold = self.get_parameter('brake_transition_threshold').value
+        
         # Set logging level
         log_level = logging.INFO
         if self.debug_level == 'debug':
@@ -412,7 +451,7 @@ class MPCController(Node):
         logging.getLogger().setLevel(log_level)
         
         # Initialize controller
-        self.controller = MPCControllerImpl(horizon=8, dt=1.0/self.update_rate)
+        self.controller = MPCControllerImpl(horizon=20, dt=0.02)
         
         # Client connection
         self.client_socket = None
@@ -488,6 +527,12 @@ class MPCController(Node):
         self.dwa_stop_requested = False  # Flag for DWA stop request
         self.black_lane_detected = False  # Flag for black lane detection
         
+        # Initialize parking-related variables
+        self.parking_stop_requested = False
+        self.parking_first_detected_time = None
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        
         # Start client connection thread
         try:
             self.connection_thread = threading.Thread(target=self.connect_to_server)
@@ -550,17 +595,50 @@ class MPCController(Node):
             
         try:
             # Apply larger deadzone to steering to prevent small oscillations
-            if abs(steer) < 0.05:  # Increased from 0.02 to 0.05
+            if abs(steer) < 0.05:  # Reduced from 0.08 to 0.05
                 steer = 0.0
             
             # Apply stronger smoothing to steering
             if not hasattr(self, 'prev_sent_steer'):
                 self.prev_sent_steer = 0.0
                 
-            # Apply stronger smoothing (80% previous, 20% new) for more stability
-            smoothing_factor = 0.2  # Reduced from 0.9 to 0.2 (more smoothing)
-            steer = smoothing_factor * steer + (1.0 - smoothing_factor) * self.prev_sent_steer
+            # Get smoothing factor parameter or use default
+            steering_smoothing_factor = getattr(self, 'steering_smoothing_factor', 0.3)
+            steer = steering_smoothing_factor * steer + (1.0 - steering_smoothing_factor) * self.prev_sent_steer
             self.prev_sent_steer = steer
+            
+            # Apply throttle smoothing to prevent oscillations
+            if not hasattr(self, 'prev_sent_throttle'):
+                self.prev_sent_throttle = 0.0
+                
+            # Get throttle smoothing factor parameter or use default
+            throttle_smoothing_factor = getattr(self, 'throttle_smoothing_factor', 0.3)
+            throttle = throttle_smoothing_factor * throttle + (1.0 - throttle_smoothing_factor) * self.prev_sent_throttle
+            self.prev_sent_throttle = throttle
+            
+            # Apply brake smoothing to prevent oscillations
+            if not hasattr(self, 'prev_sent_brake'):
+                self.prev_sent_brake = 0.0
+                
+            # Get brake smoothing factor parameter or use default
+            brake_smoothing_factor = getattr(self, 'brake_smoothing_factor', 0.3)
+            brake = brake_smoothing_factor * brake + (1.0 - brake_smoothing_factor) * self.prev_sent_brake
+            self.prev_sent_brake = brake
+            
+            # Implement smoother transition between throttle and brake
+            # If both throttle and brake are non-zero, prioritize one based on magnitude
+            if throttle > 0.0 and brake > 0.0:
+                # Get brake transition threshold parameter or use default
+                brake_transition_threshold = getattr(self, 'brake_transition_threshold', 0.3)
+                
+                # If brake is significant, reduce throttle proportionally
+                if brake > brake_transition_threshold:
+                    throttle_reduction_factor = 1.0 - (brake / 1.0)
+                    throttle = throttle * max(0.0, throttle_reduction_factor)
+                # If throttle is significant, reduce brake proportionally
+                elif throttle > brake_transition_threshold:
+                    brake_reduction_factor = 1.0 - (throttle / 1.0)
+                    brake = brake * max(0.0, brake_reduction_factor)
             
             # Ensure valid ranges
             throttle = np.clip(throttle, 0.0, 1.0)
@@ -729,6 +807,35 @@ class MPCController(Node):
                 self.get_logger().info(f"Test mode: throttle={throttle:.3f}, brake={brake:.3f}, steer={steer:.3f}")
                 return
             
+            # Check for parking stop request
+            if hasattr(self, 'parking_stop_requested') and self.parking_stop_requested:
+                # Get time since parking was first detected
+                if hasattr(self, 'parking_first_detected_time'):
+                    time_since_detection = (self.get_clock().now() - self.parking_first_detected_time).nanoseconds / 1e9
+                    
+                    # Apply progressive braking based on time
+                    if time_since_detection < 1.0:  # First second
+                        brake = 0.4  # Initial gentle brake
+                    elif time_since_detection < 2.0:  # Second second
+                        brake = 0.6  # Increase brake force
+                    else:  # After 2 seconds
+                        brake = 0.8  # Strong brake for final stop
+                    
+                    throttle = 0.0
+                    steer = 0.0
+                    
+                    # Send control commands
+                    self.send_control_commands(throttle, steer, brake)
+                    
+                    # Publish stop command as Twist
+                    cmd_vel = Twist()
+                    cmd_vel.linear.x = 0.0
+                    cmd_vel.angular.z = 0.0
+                    self.cmd_vel_publisher.publish(cmd_vel)
+                    
+                    self.get_logger().info(f"Parking stop in progress: t={time_since_detection:.1f}s, brake={brake:.2f}")
+                    return
+            
             # Check for obstacles detected by DWA
             if self.obstacle_detected or self.dwa_stop_requested or self.black_lane_detected:
                 # COMPLETE STOP - apply strong brake
@@ -769,155 +876,97 @@ class MPCController(Node):
                     
                 self.get_logger().warn(f"No waypoints available, using fallback throttle={throttle:.3f}")
                 return
+
+            # # Detect curves in waypoints - COMMENTED OUT
+            # is_curve = False
+            # curve_direction = 0  # 0: straight, 1: right turn, -1: left turn
             
-            # Detect curves in waypoints
-            is_curve = False
-            curve_direction = 0  # 0: straight, 1: right turn, -1: left turn
+            # if len(self.raw_waypoints) >= 3:
+            #     # Check for curves by analyzing waypoints
+            #     angles = []
+            #     curve_dirs = []
+            #     
+            #     for i in range(1, len(self.raw_waypoints) - 1):
+            #         p1 = self.raw_waypoints[i-1].position
+            #         p2 = self.raw_waypoints[i].position
+            #         p3 = self.raw_waypoints[i+1].position
+            #         
+            #         # Calculate vectors
+            #         v1 = np.array([p2.x - p1.x, p2.y - p1.y])
+            #         v2 = np.array([p3.x - p2.x, p3.y - p2.y])
+            #         
+            #         # Normalize vectors
+            #         v1_norm = np.linalg.norm(v1)
+            #         v2_norm = np.linalg.norm(v2)
+            #         
+            #         if v1_norm > 0.01 and v2_norm > 0.01:
+            #             v1 = v1 / v1_norm
+            #             v2 = v2 / v2_norm
+            #             
+            #             # Calculate angle between vectors
+            #             dot_product = np.clip(np.dot(v1, v2), -1.0, 1.0)
+            #             angle = np.arccos(dot_product)
+            #             angles.append(angle)
+            #             
+            #             # Determine curve direction using cross product
+            #             cross_z = v1[0]*v2[1] - v1[1]*v2[0]
+            #             curve_dirs.append(np.sign(cross_z))
+            #     
+            #     if angles:
+            #         max_angle = max(angles)
+            #         max_angle_idx = angles.index(max_angle)
+            #         
+            #         # If angle is significant, we have a curve
+            #         if np.rad2deg(max_angle) > self.curve_detection_threshold:
+            #             is_curve = True
+            #             curve_direction = curve_dirs[max_angle_idx]
             
-            if len(self.raw_waypoints) >= 3:
-                # Check for curves by analyzing waypoints
-                angles = []
-                curve_dirs = []
-                
-                for i in range(1, len(self.raw_waypoints) - 1):
-                    p1 = self.raw_waypoints[i-1].position
-                    p2 = self.raw_waypoints[i].position
-                    p3 = self.raw_waypoints[i+1].position
-                    
-                    # Calculate vectors
-                    v1 = np.array([p2.x - p1.x, p2.y - p1.y])
-                    v2 = np.array([p3.x - p2.x, p3.y - p2.y])
-                    
-                    # Normalize vectors
-                    v1_norm = np.linalg.norm(v1)
-                    v2_norm = np.linalg.norm(v2)
-                    
-                    if v1_norm > 0.01 and v2_norm > 0.01:
-                        v1 = v1 / v1_norm
-                        v2 = v2 / v2_norm
-                        
-                        # Calculate angle between vectors
-                        dot_product = np.clip(np.dot(v1, v2), -1.0, 1.0)
-                        angle = np.arccos(dot_product)
-                        angles.append(angle)
-                        
-                        # Determine curve direction using cross product
-                        cross_z = v1[0]*v2[1] - v1[1]*v2[0]
-                        curve_dirs.append(np.sign(cross_z))
-                
-                if angles:
-                    max_angle = max(angles)
-                    max_angle_idx = angles.index(max_angle)
-                    
-                    # If angle is significant, we have a curve
-                    if np.rad2deg(max_angle) > self.curve_detection_threshold:
-                        is_curve = True
-                        curve_direction = curve_dirs[max_angle_idx]
+            # # COMPLETE STOP for curves - COMMENTED OUT
+            # if is_curve:
+            #     self.get_logger().info(f"Curve detected! Direction: {'right' if curve_direction > 0 else 'left'}, angle: {np.rad2deg(max_angle):.1f}° - STOPPING")
+            #     
+            #     # Complete stop with strong brake
+            #     throttle = 0.0
+            #     brake = 0.8  # Strong brake
+            #     steer = 0.0
+            #     
+            #     # Send control commands
+            #     self.send_control_commands(throttle, steer, brake)
+            #     
+            #     # Publish cmd_vel with zero speed
+            #     cmd_vel = Twist()
+            #     cmd_vel.linear.x = 0.0  # Complete stop
+            #     cmd_vel.angular.z = 0.0
+            #     self.cmd_vel_publisher.publish(cmd_vel)
+            #     
+            #     self.get_logger().warn(f"COMPLETE STOP due to curve: throttle={throttle:.3f}, brake={brake:.3f}")
+            #     return
             
-            # COMPLETE STOP for curves
-            if is_curve:
-                self.get_logger().info(f"Curve detected! Direction: {'right' if curve_direction > 0 else 'left'}, angle: {np.rad2deg(max_angle):.1f}° - STOPPING")
-                
-                # Complete stop with strong brake
-                throttle = 0.0
-                brake = 0.8  # Strong brake
-                steer = 0.0
-                
-                # Send control commands
-                self.send_control_commands(throttle, steer, brake)
-                
-                # Publish cmd_vel with zero speed
-                cmd_vel = Twist()
-                cmd_vel.linear.x = 0.0  # Complete stop
-                cmd_vel.angular.z = 0.0
-                self.cmd_vel_publisher.publish(cmd_vel)
-                
-                self.get_logger().warn(f"COMPLETE STOP due to curve: throttle={throttle:.3f}, brake={brake:.3f}")
-                return
-            
-            # Straight line following - IMPROVED FOR SMOOTHER CONTROL
-            throttle = 0.7  # Good speed for straight lines
+            # Waypoint following with constant speed
+            throttle = 0.5  # Moderate constant speed
             brake = 0.0
             steer = 0.0
             
-            # Calculate steering to follow waypoints with smoother control
+            # Calculate steering to follow waypoints
             if len(self.raw_waypoints) >= 2:
-                # Get multiple waypoints for smoother path following
-                num_points_to_consider = min(5, len(self.raw_waypoints))
-                waypoint_positions = []
+                # Get current position (assuming first waypoint is closest to current position)
+                current_pos = np.array([self.raw_waypoints[0].position.x, self.raw_waypoints[0].position.y])
                 
-                for i in range(num_points_to_consider):
-                    waypoint_positions.append(np.array([
-                        self.raw_waypoints[i].position.x,
-                        self.raw_waypoints[i].position.y
-                    ]))
+                # Get target position (next waypoint)
+                target_pos = np.array([self.raw_waypoints[1].position.x, self.raw_waypoints[1].position.y])
                 
-                # Calculate average direction of the path
-                avg_direction_x = 0.0
-                avg_direction_y = 0.0
+                # Calculate direction to target
+                direction = target_pos - current_pos
+                target_heading = np.arctan2(direction[1], direction[0])
                 
-                for i in range(1, len(waypoint_positions)):
-                    direction = waypoint_positions[i] - waypoint_positions[0]
-                    direction_norm = np.linalg.norm(direction)
-                    if direction_norm > 0.01:
-                        direction = direction / direction_norm
-                        avg_direction_x += direction[0]
-                        avg_direction_y += direction[1]
+                # Calculate steering angle (simple proportional control)
+                # Reduce steering gain for smoother control
+                steer = np.clip(0.3 * target_heading, -0.5, 0.5)
                 
-                if abs(avg_direction_x) > 0.01 or abs(avg_direction_y) > 0.01:
-                    # Normalize the average direction
-                    direction_norm = np.sqrt(avg_direction_x**2 + avg_direction_y**2)
-                    avg_direction_x /= direction_norm
-                    avg_direction_y /= direction_norm
-                    
-                    # Calculate heading based on average direction
-                    desired_heading = np.arctan2(avg_direction_y, avg_direction_x)
-                    
-                    # Calculate cross-track error (lateral deviation)
-                    # Use the first two waypoints to define a line
-                    if len(waypoint_positions) >= 2:
-                        p1 = waypoint_positions[0]
-                        p2 = waypoint_positions[1]
-                        
-                        # Calculate cross-track error (distance from origin to line)
-                        # For a line defined by two points p1 and p2, and a point p0 (origin),
-                        # the cross-track error is the distance from p0 to the line
-                        if np.linalg.norm(p2 - p1) > 0.01:
-                            # Vector from p1 to p2
-                            v = p2 - p1
-                            # Unit vector perpendicular to v
-                            perp = np.array([-v[1], v[0]]) / np.linalg.norm(v)
-                            # Cross-track error is the dot product of p1 and perp
-                            cross_track_error = np.dot(p1, perp)
-                            
-                            # Adjust desired heading based on cross-track error
-                            # This helps to converge to the path
-                            cross_track_correction = np.arctan2(0.3 * cross_track_error, 1.0)
-                            desired_heading += cross_track_correction
-                    
-                    # Apply a very gentle proportional control for steering
-                    # Reduce the steering gain for smoother control
-                    steer = np.clip(0.2 * desired_heading, -0.5, 0.5)
-                    
-                    # Apply additional smoothing to steering
-                    if hasattr(self, 'prev_steer'):
-                        # Strong smoothing (70% previous, 30% new)
-                        steer = 0.3 * steer + 0.7 * self.prev_steer
-                    
-                    # Store current steering for next iteration
-                    self.prev_steer = steer
-            
-            # Check if DWA has provided a valid command for straight line
-            if self.direct_dwa_connection and hasattr(self, 'dwa_cmd') and self.dwa_cmd:
-                dwa_cmd_age = (self.get_clock().now() - self.last_dwa_cmd_time).nanoseconds / 1e9
-                if dwa_cmd_age < 0.5:  # Only use recent DWA commands (less than 0.5 seconds old)
-                    # Use DWA's linear velocity as a guide for throttle
-                    dwa_linear = self.dwa_cmd.linear.x
-                    if dwa_linear > 0:
-                        # Scale DWA's velocity to throttle (assuming max velocity is around 10 m/s)
-                        dwa_throttle = min(0.7, dwa_linear / 10.0)
-                        throttle = min(throttle, dwa_throttle)  # Use the lower of the two throttles
-                        self.get_logger().debug(f"Using DWA throttle guidance: {dwa_throttle:.3f}")
+                # Apply steering smoothing
+                if hasattr(self, 'prev_steer'):
+                    steer = 0.3 * steer + 0.7 * self.prev_steer
+                self.prev_steer = steer
             
             # Send control commands
             self.send_control_commands(throttle, steer, brake)
@@ -928,7 +977,7 @@ class MPCController(Node):
             cmd_vel.angular.z = steer * 0.5
             self.cmd_vel_publisher.publish(cmd_vel)
             
-            self.get_logger().info(f"Straight line: throttle={throttle:.3f}, brake={brake:.3f}, steer={steer:.3f}")
+            self.get_logger().info(f"Following waypoints: throttle={throttle:.3f}, brake={brake:.3f}, steer={steer:.3f}")
             
         except Exception as e:
             self.get_logger().error(f"Error in control loop: {str(e)}")
@@ -952,26 +1001,65 @@ class MPCController(Node):
             # Log waypoints received
             self.get_logger().debug(f"Received {len(self.raw_waypoints)} waypoints")
             
-            # Check for curves in waypoints
-            is_curve, distance_to_curve, curve_direction = self.detect_curve_in_waypoints(self.raw_waypoints)
+            # Check for parking lanes in metadata
+            if hasattr(self, 'latest_metadata') and self.latest_metadata:
+                for i, metadata in enumerate(self.latest_metadata):
+                    if metadata['lane_type'] == 8:  # 8 is parking lane type
+                        # Calculate distance to parking lane
+                        if i < len(self.raw_waypoints):
+                            parking_pos = self.raw_waypoints[i].position
+                            try:
+                                # Get current vehicle position from tf
+                                transform = self.tf_buffer.lookup_transform(
+                                    self.map_frame_id,
+                                    self.vehicle_frame_id,
+                                    rclpy.time.Time()
+                                )
+                                
+                                if transform:
+                                    current_x = transform.transform.translation.x
+                                    current_y = transform.transform.translation.y
+                                    
+                                    # Calculate distance to parking waypoint
+                                    distance = np.sqrt(
+                                        (parking_pos.x - current_x)**2 +
+                                        (parking_pos.y - current_y)**2
+                                    )
+                                    
+                                    # If we're close to the parking lane, initiate stop
+                                    if distance < 5.0:  # 5 meters threshold
+                                        self.get_logger().info(f"Parking lane detected at {distance:.2f}m - Initiating stop")
+                                        # Set flags for stopping
+                                        self.parking_stop_requested = True
+                                        self.parking_first_detected_time = self.get_clock().now()
+                                        # Apply immediate gradual stop
+                                        if self.is_connected:
+                                            # Start with gentle brake
+                                            self.send_control_commands(0.0, 0.0, 0.4)
+                                        return
+                            except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
+                                self.get_logger().warn(f"Could not get transform: {e}")
             
-            # Store curve information for use in control loop
-            self.curve_detected = is_curve
-            self.distance_to_curve = distance_to_curve
-            self.curve_direction = curve_direction
+            # # Check for curves in waypoints
+            # # is_curve, distance_to_curve, curve_direction = self.detect_curve_in_waypoints(self.raw_waypoints)
             
-            # If a curve is detected, prepare for gradual stopping
-            if is_curve:
-                # Calculate throttle reduction based on distance to curve
-                # The closer we are to the curve, the more we reduce throttle
-                if distance_to_curve < 5.0:  # Very close to curve
-                    throttle_factor = 0.3  # Significant reduction
-                elif distance_to_curve < 10.0:  # Approaching curve
-                    throttle_factor = 0.5  # Moderate reduction
-                else:  # Far from curve
-                    throttle_factor = 0.7  # Slight reduction
+            # # Store curve information for use in control loop
+            # self.curve_detected = is_curve
+            # self.distance_to_curve = distance_to_curve
+            # self.curve_direction = curve_direction
+            
+            # # If a curve is detected, prepare for gradual stopping
+            # if is_curve:
+            #     # Calculate throttle reduction based on distance to curve
+            #     # The closer we are to the curve, the more we reduce throttle
+            #     if distance_to_curve < 5.0:  # Very close to curve
+            #         throttle_factor = 0.3  # Significant reduction
+            #     elif distance_to_curve < 10.0:  # Approaching curve
+            #         throttle_factor = 0.5  # Moderate reduction
+            #     else:  # Far from curve
+            #         throttle_factor = 0.7  # Slight reduction
                 
-                self.get_logger().info(f"Preparing for curve: distance={distance_to_curve:.1f}m, throttle_factor={throttle_factor:.1f}")
+            #     self.get_logger().info(f"Preparing for curve: distance={distance_to_curve:.1f}m, throttle_factor={throttle_factor:.1f}")
             
         except Exception as e:
             self.get_logger().error(f"Error processing waypoints: {str(e)}")
@@ -1015,9 +1103,29 @@ class MPCController(Node):
                 self.obstacle_first_detected_time = self.get_clock().now()
                 self.get_logger().warn("Stop command received from DWA - Obstacle or black lane detected")
                 
-                # Send immediate stop command
+                # Get emergency brake force parameter or use default
+                emergency_brake_force = getattr(self, 'emergency_brake_force', 0.6)
+                
+                # Apply progressive braking based on current velocity
+                # Higher speed requires stronger braking
+                if hasattr(self, 'current_velocity'):
+                    # Scale brake force based on current velocity
+                    # At low speeds, use gentler braking
+                    if self.current_velocity < 5.0:
+                        brake_force = emergency_brake_force * 0.5  # 50% of emergency brake force
+                    # At medium speeds, use moderate braking
+                    elif self.current_velocity < 10.0:
+                        brake_force = emergency_brake_force * 0.7  # 70% of emergency brake force
+                    # At high speeds, use full emergency braking
+                    else:
+                        brake_force = emergency_brake_force
+                else:
+                    # If velocity is unknown, use moderate braking
+                    brake_force = emergency_brake_force * 0.7
+                
+                # Send immediate stop command with calculated brake force
                 if self.is_connected:
-                    self.send_control_commands(0.0, 0.0, 0.8)  # No throttle, no steering, strong brake
+                    self.send_control_commands(0.0, 0.0, brake_force)
                     
                     # Also publish stop command as Twist
                     cmd_vel = Twist()
@@ -1036,6 +1144,11 @@ class MPCController(Node):
                 if hasattr(self, 'obstacle_first_detected_time'):
                     duration = (self.get_clock().now() - self.obstacle_first_detected_time).nanoseconds / 1e9
                     self.get_logger().info(f"DWA stop command cleared after {duration:.2f}s - Resuming normal operation")
+                    
+                    # Apply gradual resumption of motion instead of immediate acceleration
+                    if self.is_connected:
+                        # Start with very gentle throttle
+                        self.send_control_commands(0.1, 0.0, 0.0)
         
         # Log DWA commands if debug is enabled
         if self.debug_level == 'debug':
